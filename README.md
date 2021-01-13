@@ -1,3 +1,5 @@
+[![Go Reference](https://pkg.go.dev/badge/github.com/gkong/go-qweb.svg)](https://pkg.go.dev/github.com/gkong/go-qweb)
+
 # go-qweb - golang web app components
 
 This module contains golang packages useful for building web apps.
