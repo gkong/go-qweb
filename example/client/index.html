@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<!-- Copyright 2016 George S. Kong. All Rights Reserved. -->
+	<!--  Use of this source code is governed by a license that can be found in the LICENSE.txt file. -->
+
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+	
+	<title>sample single-page-app</title>
+
+	<link href="/static/bs-3.3.5/css/bootstrap.min.css" rel="stylesheet">
+	<link href="/static/bs-3.3.5/css/bootstrap-theme.min.css" rel="stylesheet">
+	<style>
+		.add-border { border: 1px solid #888; border-radius: 4px; padding: 1.5em; }
+	</style>
+
+	<script src="/static/jquery.js"></script>
+	<script src="/static/handlebars.js"></script>
+	<script src="/static/page.js"></script>
+	<script src="/static/rsvp.js"></script>
+</head>
+<body>
+
+	<div id="main" class="container">JAVASCRIPT REQUIRED<br/><br/></div>
+
+	<script src="/static/bs-3.3.5/js/bootstrap.min.js"></script>
+
+	<script id="login-template" type="text/x-handlebars-template">
+		<div class="login col-xs-6 col-md-4">
+			<h1>Login</h1>
+			<br/>
+			<form class="add-border">
+				<div class="form-group">
+					<label for="lfName">username</label>
+					<input id="lfName" class="form-control" "type="text" name="uname987" />
+				</div>
+				<div class="form-group">
+					<label for="lfPass">password</label>
+					<input id="lfPass" class="form-control" type="password" name="pass987" />
+				</div>
+				<div id="login-alert" class="alert alert-danger"></div>
+				<button type="button" class="btn btn-primary" onclick="login();">login</button>
+			</form>
+		</div>
+	</script>
+
+	<script id="home-template" type="text/x-handlebars-template">
+		<div class="home col-xs-12 col-md-6">
+			<h1>Home</h1>
+			<br/>
+			<p>Logged in as <b>'{{username}}'</b></p>
+			<p>Current note: <b>'{{note}}'</b></p>
+			<br/>
+			<form onsubmit="update();" class="add-border">
+				<div class="form-group">
+					<label for="ufNote">new note</label>
+					<input id="ufNote" class="form-control" type="text" size="40" name="note123" />
+				</div>
+				<div id="update-alert" class="alert alert-danger"></div>
+				<button type="button" class="btn btn-primary" onclick="update();">update</button>
+			</form>
+			<br/><br/><p><button type="button" onclick="page('/hello');">hello</button></p>
+			<br/><p><button type="button" onclick="logout();">logout</button></p>
+		</div>
+	</script>
+
+	<script>
+		// single page app - maintains a user-settable string in session storage
+		//     page.js - single-page-app routing
+		//     rsvp.js - invoking server REST api
+		//     handlebars.js - template rendering
+
+		var authType = "cookie"; // query the server for this, can be token or cookie
+		var token = "";          // token received from server
+		var ttl = 60;            // session time-to-live, should receive from server
+		var loggedIn = false;
+
+		var sessTime = 0;    // counts seconds when logged in; zeroed every refresh
+		var minRefresh = 0;  // don't refresh before this many seconds
+
+		var loginTemplate = Handlebars.compile($('#login-template').html());
+		var homeTemplate = Handlebars.compile($('#home-template').html());
+
+		// XMLHttpRequest GET and POST implemented as RSVP promises.
+		// parameter to all handlers is the xhr object.
+
+		var xhrGetJson = function(url) {
+		  var promise = new RSVP.Promise(function(resolve, reject){
+		    var client = new XMLHttpRequest();
+		    client.open("GET", url);
+		    client.onreadystatechange = handler;
+			if (authType == "token"  &&  token != "")
+				client.setRequestHeader("Authorization", "Bearer " + token);
+		    client.send();
+
+		    function handler() {
+		      if (this.readyState === this.DONE) {
+		        if (this.status === 200) { resolve(this); }
+		        else { reject(this); }
+		      }
+		    };
+		  });
+		
+		  return promise;
+		};
+
+		// xhr POST implemented as RSVP promise. param to handlers is the xhr object.
+		var xhrPostJson = function(url, data) {
+		  var promise = new RSVP.Promise(function(resolve, reject){
+		    var client = new XMLHttpRequest();
+		    client.open("POST", url, true);
+		    client.onreadystatechange = handler;
+			if (authType == "token"  &&  token != "")
+				client.setRequestHeader("Authorization", "Bearer " + token);
+			client.setRequestHeader("Content-type", "application/json;charset=UTF-8");
+			client.setRequestHeader("Content-length", data.length);
+		    client.send(data);
+
+		    function handler() {
+		      if (this.readyState === this.DONE) {
+		        if (this.status === 200) { resolve(this); }
+		        else { reject(this); }
+		      }
+		    };
+		  });
+		
+		  return promise;
+		};
+
+
+		xhrGetJson("/authtype").then(function(okXHR) {
+			if (okXHR.responseText == "token")
+				authType = "token";
+			else if (okXHR.responseText == "cookie")
+				authType = "cookie";
+			// else silently ignore errors
+		}, function(errorXHR) {
+			// silently ignore errors
+		});
+
+
+		// (user-visible) routes and router destination functions
+
+		page('/', rootPage);
+		page('/login', loginPage);
+		page('/home', homePage);
+		page('/hello', helloPage);
+		page('*', notfoundPage);
+		page();
+
+
+		function rootPage(ctx, next) {
+			xhrGetJson("/fetch").then(function() {
+				page.redirect('/home');
+			}, function() {
+				page.redirect('/login');
+			});
+		}
+
+		function loginPage(ctx, next) {
+			$('#main').html(loginTemplate({}));
+			$('#login-alert').hide();
+		}
+
+		function homePage(ctx, next) {
+			// currently fetches note from server every time this page is displayed.
+			// could maintain it in a global variable
+			// (NOT in ctx, because all pages in history should see the same value).
+			xhrGetJson("/fetch").then(function(okXHR) {
+				var responseObj = JSON.parse(okXHR.responseText);
+				$('#main').html(homeTemplate(responseObj));
+				$('#update-alert').hide();
+			}, function(errorXHR) {
+				page.redirect('/login');
+			});
+		}
+
+		function helloPage(ctx, next) {
+			$('#main').html('<h1>Hi!</h1>');
+		}
+
+		function notfoundPage(ctx, next) {
+			$('#main').html('<h1>PAGE NOT FOUND</h1>');
+		}
+
+
+		// actions invoked by UI events, which interact with the server REST API
+
+		function login() {
+			$('#login-alert').hide();
+			var loginParams = {
+				username: $('#lfName').val(),
+				password: $('#lfPass').val(),
+			};
+			xhrPostJson("/login",JSON.stringify(loginParams)).then(function(okXHR) {
+				var responseObj = JSON.parse(okXHR.responseText);
+				if (responseObj.hasOwnProperty("token"))
+					token = responseObj.token;
+				if (responseObj.hasOwnProperty("ttl"))
+					ttl = responseObj.ttl;
+				loggedIn = true;
+				sessionSecs = 0;
+				minRefresh = ttl/5;
+				page('/home');
+			}, function(errorXHR) {
+				if (!errorXHR.responseText)
+					$('#login-alert').html("login failed, error "+errorXHR.status.toString());
+				else
+					$('#login-alert').html(errorXHR.responseText);
+				$('#login-alert').show();
+			});
+		}
+
+		function update() {
+			$('#update-alert').hide();
+			var updateParams = {
+				note: $('#ufNote').val(),
+			};
+			xhrPostJson("/update",JSON.stringify(updateParams)).then(function(okXHR) {
+				page.redirect('/home');
+			}, function(errorXHR) {
+				if (errorXHR.status == 401) {
+					loggedIn = false;
+					page('/login');
+				} else {
+					if (!errorXHR.responseText)
+						$('#update-alert').html("update failed, error "+errorXHR.status.toString());
+					else
+						$('#update-alert').html(errorXHR.responseText);
+					$('#update-alert').show();
+				}
+			});
+		}
+
+		function logout() {
+			xhrPostJson("/logout","").then(function(okXHR) {
+				// XXX - save token and ttl from response
+				loggedIn = false;
+				page('/login');
+			}, function(errorXHR) {
+				if (errorXHR.status == 401)
+					alert("you are already logged out");
+				else
+					alert("logout failed, error "+errorXHR.status.toString());
+			});
+		}
+
+		//
+		// aggressive client-side session refresh.
+		// see qctx.MwRequireSess for an example of server-side refresh.
+		//
+
+		function incrSessTime() {
+			if (loggedIn)
+				sessTime++;
+		}
+
+		var _activityTimer = window.setInterval(incrSessTime, 1000);
+
+		function userDidSomething() {
+			if (loggedIn && (sessTime > minRefresh)) {
+				xhrGetJson("/refresh").then(function(okXHR) {
+					sessTime = 0;
+				}, function(errorXHR) {
+					if (errorXHR.status == 401) {
+						loggedIn = false;
+						alert("session expired");
+						page('/login');
+					} else
+						alert("refresh failed, error "+errorXHR.status.toString());
+				});
+			}
+		}
+
+		document.onclick = function() { userDidSomething(); };
+		document.onmousemove = function() { userDidSomething(); };
+		document.onkeypress = function() { userDidSomething(); };
+
+	</script>
+
+</body>
+</html>

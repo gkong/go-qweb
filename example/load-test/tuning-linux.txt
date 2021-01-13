@@ -1,0 +1,66 @@
+
+too many open files (both client and server)
+	=> increase to 100000
+		add the following line to /etc/security/limits.conf
+			* - nofile 100000
+		add the following line to /etc/systemd/user.conf  AND  /etc/systemd/system.conf
+			DefaultLimitNOFILE=100000
+		reboot
+
+
+to observe number of open files allowed per process:
+	ulimit -n
+
+to observe total open files allowed system-wide:
+	sysctl fs.file-max
+
+to observe number of files actually open system-wide:
+	lsof | wc -l
+
+to observe number of active network connections:
+	netstat -an | fgrep 8080 | wc -l
+
+to observe range of port numbers available:
+	cat /proc/sys/net/ipv4/ip_local_port_range
+
+to observe max allowed pending socket connection backlog:
+	cat /proc/sys/net/core/somaxconn
+
+
+MySQL hints
+
+	The following set of hints is not comprehensive, and it may not be current,
+	but it may serve as a starting point for scaling-up MySQL.
+
+	examine settings in mysql shell:
+		SHOW VARIABLES LIKE '%connect%';
+		SHOW VARIABLES LIKE '%timeout%';
+		SHOW VARIABLES LIKE '%files%';
+
+	temporarily set variables in mysql shell:
+		SET GLOBAL max_connections = 20000;
+
+	in golang web app:
+		sdb.SetMaxOpenConns(20000)
+		sdb.SetMaxIdleConns(20000)
+
+	in /etc/mysql/my.cnf:
+		[mysqld]
+		max_connections = 20000
+		back_log = 2000
+
+	open files - mysql does NOT follow the limit set in /etc/security/limits.conf
+		ln -s /lib/systemd/system/mysql.service /etc/systemd/system/
+		add the following lines at the END of mysql.service
+			LimitNOFILE=20000
+			ExecStop=/usr/bin/mysqladmin --defaults-file=/etc/mysql/debian.cnf shutdown
+		[ MYSQL IGNORES open_files_limit in my.cnf ]
+		systemctl daemon-reload
+		service mysql restart
+
+	system socket connection backlog:
+		cat /proc/sys/net/core/somaxconn
+		echo 4096 > /proc/sys/net/core/somaxconn
+		OR sysctl -w net.core.somaxconn=4096
+		add to /etc/sysctl.conf - net.core.somaxconn=4096
+

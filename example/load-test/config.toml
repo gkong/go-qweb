@@ -1,0 +1,67 @@
+# Copyright 2016 George S. Kong. All rights reserved.
+# Use of this source code is governed by a license that can be found in the LICENSE.txt file.
+
+
+scenario = "default"
+
+rootURL = "http://localhost:8080/"
+
+maxPorts  = 28232  # number of ports available in the system
+maxActive = 25000  # max active users we will allow, based on ports, open files, etc.
+
+serverExit = false
+
+[scenarios]
+
+	# Default - one minute, moderate load, with login/logout. (Making an
+	# interesting 1-min test required unusual numbers for some parameters.)
+    [scenarios.default]
+	testSecs  = 60
+	numUsers  = 2000
+	msBetwReq = 500
+	showStats = true
+	showWait  = false
+	alwaysOn  = false
+		activitiesPerDay = 48
+		secsPerActivity  = 1740  # 29 mins
+		fracLogout       = 0.5
+
+	# 30 sec, moderate load, always on, for regression testing
+    [scenarios.test]
+	testSecs  = 30
+	numUsers  = 500
+	msBetwReq = 250
+	showStats = false
+	showWait  = false
+	alwaysOn  = true
+
+	# steady 1 req/user/sec
+	[scenarios.steady]
+	testSecs  = 86400  # one day
+	numUsers  = 1000
+	msBetwReq = 1000
+	showStats = true
+	showWait  = false
+	alwaysOn  = true
+
+	# 200K users, 3 45-min activities per day, max a little under 5K reqs/sec
+	# load varies slowly over time, max after 14.5 hours (not counting password file generation).
+	[scenarios.manyusers]
+	testSecs  = 86400  # one day
+	numUsers  = 200000
+	msBetwReq = 5000
+	showStats = true
+	showWait  = false
+	alwaysOn  = false
+		activitiesPerDay = 3
+		secsPerActivity  = 2700  # 45 mins
+		fracLogout       = 0.5
+
+	# just a few users, for testing response time
+	[scenarios.responsetime]
+	testSecs  = 60
+	numUsers  = 10
+	msBetwReq = 1000
+	showStats = true
+	showWait  = true
+	alwaysOn  = true

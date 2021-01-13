@@ -1,0 +1,45 @@
+# Copyright 2016 George S. Kong. All rights reserved.
+# Use of this source code is governed by a license that can be found in the LICENSE.txt file.
+
+sessionDB = "goleveldb"
+passwordDB = "goleveldb"  # currently only "goleveldb" or "cassandra" allowed
+listenAndServeAddr = ":8080"
+bcryptCost = 8
+logging = false
+
+[qsess]
+authType = "cookie"
+maxAgeSecs = 86400      # 24 hours
+minRefreshSecs = 3600   # 1 hour
+cookieSecure = false
+cookieHTTPOnly = true
+encryptKey = "key-to-encrypt------------------"
+
+[goleveldb]
+dbFile = "./0-GLDB-database"
+# key prefixes are TOML int arrays which will be converted to byte slices
+# by truncating each element to fit into a byte. if you're using goleveldb
+# for sessions or passwords, but not both, you can use an empty array
+sessKeyPrefix = [ 255 ]
+passwdKeyPrefix = [ 254 ]
+
+[mysql]
+user = "spaTestUser"
+password = "hello"
+database = "testSPA"
+sessTableName = "session"
+sessDataColDef = "VARBINARY(500) NOT NULL"
+sessUIDColDef = "VARBINARY(32) NULL"
+maxOpenConns = 20000
+maxIdleConns = 20000
+
+[cassandra]
+clusterAddr = "127.0.0.1"
+keySpace = "excass"
+protoversion = 3          # Syclla requires 3, Cassandra can use 4
+consistency = "quorum"
+sessUIDIndex = false      # set only if using DeleteByUserID with Cassandra
+sessUIDToClient = false   # set only if using DeleteByUserID with Scylla
+sessTableName = "session"
+passwordTableName = "password"
+timeoutMsec = 5000
