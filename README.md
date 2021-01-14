@@ -7,22 +7,50 @@ It includes a load test program which can generate heavy simulated traffic,
 for exercising the components and observing their performance.
 
 # qsess
-Package `qsess` implements web sessions, with a user-definable session data type,
+Package `qsess` is a server-side web session manager.
+It manages data which persists for the life of a session,
+so that one invocation of a REST API can store data which all subsequent calls
+during the life of the session can read and modify.
+It also manages client access to sessions via cookies or tokens.
+
+For example, a login function can authenticate a user and use `qsess`
+to store a user ID in session storage and return a cookie or token to the client.
+In each subsequent request, the client includes the cookie or token,
+and `qsess` checks the validity of the cookie or token
+(thereby authenticating the client) and makes the
+user ID available to the request handler.
+
+Another example use is for email address validation.
+The application creates a session, emails a token to the user,
+and remembers the email address and other user information
+in session storage. When the user visits a web page,
+including the token in the URL, the application can mark
+the email address as validated and close the session.
+
+Package `qsess` provides a user-definable session data type,
 support for cookies and tokens, session revocation by user id, and back-ends for
 goleveldb, Cassandra/Scylla, MySQL, and a simple, in-memory store.
 
 It is independent of, but integrates easily with, routers,
 middleware frameworks, http.Request.Context(), etc.
-The core package, `qsess`, has zero dependencies beyond the standard library.
-Database back-ends, which reside in sub-packages, each depend on a database driver.
+The core package, `qsess`, has zero dependencies.
+Database back-ends, which reside in sub-packages,
+each depend only on a database-specific driver module.
 Back-end sub-packages currently include
 `qscql` (Cassandra/Scylla), `qsldb` (goleveldb), and `qsmy` (MySQL).
 
 # qctx
-Package `qctx` is a light-weight, type-safe, per-http-request state manager,
-with simple middleware stacking and a few middleware and helper functions.
+Package `qctx` is a light-weight, type-safe, per-http-request state manager.
 
-Request-scoped data is kept in a Ctx struct. Support is included for `net/http`,
+Whereas `qsess` manages data that persists during an entire session,
+which can include many HTTP requests over a long time,
+`qctx` manages data that only persists for the life of a single request.
+This allows independently-coded software modules, such as stackable
+middleware modules, to share data.
+
+The package includes a simple middleware stacking facility and a few middleware and helper functions.
+
+Support is included for `net/http`,
 `julienschmidt/httprouter`, and `qsess` sessions.
 
 # example web application and load test
