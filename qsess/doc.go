@@ -3,7 +3,7 @@
 
 // Package qsess implements web sessions, with a user-definable session
 // data type, support for cookies and tokens, session revocation by user id,
-// and back-ends for goleveldb, Cassandra/Syclla, MySQL, and a simple,
+// and back-ends for goleveldb, Cassandra/Syclla, PostgreSQL, MySQL, and a simple,
 // in-memory store.
 //
 // It is independent of, but integrates easily with, routers,
@@ -48,17 +48,17 @@
 // (Storing session data only in clients, with a "stateless" back-end,
 // is not supported.)
 //
-// It is recommended that you supply your own data type and serializer
-// for session data, using Store.NewSessData. (See qstest/benchmark_test.go
+// If the only session data you require is a user id, you can ignore
+// Session.Data entirely. Just provide the user id as a byte slice to Store.NewSession
+// and get it via Session.UserID. Set Store.NewSessData to nil,
+// to avoid allocating an empty VarMap for every session.
+//
+// If you require session data beyond just a user id,
+// it is recommended that you supply a data type and serializer,
+// using Store.NewSessData. (See qstest/benchmark_test.go
 // for examples.) If you do not, the default session data type, VarMap, is a
 // map[interface{}]interface{} with gob serialization (which is very slow,
 // compared to the alternatives in qstest/benchmark_test.go).
-//
-// If you need no session data besides a user id, you can ignore
-// Session.Data entirely and save the user id when calling Store.NewSession
-// and get it using Session.UserID. In this case, you can set
-// Store.NewSessData to nil, to avoid allocating an empty VarMap
-// for every session.
 //
 // If AuthType is TokenAuth, session references are transmitted to/from
 // the client as tokens, rather than cookies. Tokens are opaque,

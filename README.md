@@ -37,7 +37,7 @@ The core package, `qsess`, has zero dependencies.
 Database back-ends, which reside in sub-packages,
 each depend only on a database-specific driver module.
 Back-end sub-packages currently include
-`qscql` (Cassandra/Scylla), `qsldb` (goleveldb), and `qsmy` (MySQL).
+`qscql` (Cassandra/Scylla), `qsldb` (goleveldb), `qspgx` (PostgreSQL), and `qsmy` (MySQL).
 
 # qctx
 Package `qctx` is a light-weight, type-safe, per-http-request state manager.
