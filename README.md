@@ -2,7 +2,7 @@
 
 # go-qweb - golang web app components
 
-This module contains golang packages useful for building web apps.
+This module contains light-weight, minimal-dependency golang packages useful for building web apps.
 It includes a load test program which can generate heavy simulated traffic,
 for exercising the components and observing their performance.
 
@@ -13,29 +13,32 @@ so that one invocation of a REST API can store data which all subsequent calls
 during the life of the session can read and modify.
 It also manages client access to sessions via cookies or tokens.
 
-For example, a login function can authenticate a user and use `qsess`
+### uses
+A login function can authenticate a user and use `qsess`
 to store a user ID in session storage and return a cookie or token to the client.
 In each subsequent request, the client includes the cookie or token,
 and `qsess` checks the validity of the cookie or token
 (thereby authenticating the client) and makes the
 user ID available to the request handler.
 
-Another example use is for email address validation.
-The application creates a session, emails a token to the user,
-and remembers the email address and other user information
-in session storage. When the user visits a web page,
-including the token in the URL, the application can mark
-the email address as validated and close the session.
+An email address validation function can use `qsess` create a session containing
+an email address and other user information and generate a token to send to the user in an email.
+Later, the user clicks a link in the email, causing their browser to present the token to the application,
+which retrieves the user's email address and other information from session storage and completes the validation.
+If the user waits too long, the session automatically expires, invalidating the token.
 
-Package `qsess` provides a user-definable session data type,
-support for cookies and tokens, session revocation by user id, and back-ends for
-goleveldb, Cassandra/Scylla, MySQL, and a simple, in-memory store.
+### `qsess` features
+- user-definable session data types
+- authentication via cookies and tokens
+- session expiration
+- revocation of all sessions for a given user id, for secure password changes
+- back-ends for goleveldb, Cassandra/Scylla, PostgreSQL, MySQL, and a simple, in-memory store
 
-It is independent of, but integrates easily with, routers,
+### zero dependencies
+`qsess` is independent of, but integrates easily with, routers,
 middleware frameworks, http.Request.Context(), etc.
-The core package, `qsess`, has zero dependencies.
-Database back-ends, which reside in sub-packages,
-each depend only on a database-specific driver module.
+The core package, has zero dependencies.
+Database back-ends, which reside in sub-packages, each depend only on a database-specific driver module.
 Back-end sub-packages currently include
 `qscql` (Cassandra/Scylla), `qsldb` (goleveldb), `qspgx` (PostgreSQL), and `qsmy` (MySQL).
 
@@ -44,7 +47,7 @@ Package `qctx` is a light-weight, type-safe, per-http-request state manager.
 
 Whereas `qsess` manages data that persists during an entire session,
 which can include many HTTP requests over a long time,
-`qctx` manages data that only persists for the life of a single request.
+`qctx` manages data that only persists for the life of a single HTTP request.
 This allows independently-coded software modules, such as stackable
 middleware modules, to share data.
 
@@ -89,8 +92,6 @@ activity and periods of rest with login/logout.
 
 # Install and Run
 
-	install go
-	git clone...
 	cd example/server-qsess
 	go build
 	./server-qsess
