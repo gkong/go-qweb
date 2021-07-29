@@ -21,13 +21,13 @@ and `qsess` checks the validity of the cookie or token
 (thereby authenticating the client) and makes the
 user ID available to the request handler.
 
-An email address validation function can use `qsess` create a session containing
+An email address validation function can use `qsess` to create a session containing
 an email address and other user information and generate a token to send to the user in an email.
 Later, the user clicks a link in the email, causing their browser to present the token to the application,
 which retrieves the user's email address and other information from session storage and completes the validation.
 If the user waits too long, the session automatically expires, invalidating the token.
 
-### `qsess` features
+### features
 - user-definable session data types
 - authentication via cookies and tokens
 - session expiration
@@ -37,7 +37,7 @@ If the user waits too long, the session automatically expires, invalidating the 
 ### zero dependencies
 `qsess` is independent of, but integrates easily with, routers,
 middleware frameworks, http.Request.Context(), etc.
-The core package, has zero dependencies.
+The core package has zero dependencies.
 Database back-ends, which reside in sub-packages, each depend only on a database-specific driver module.
 Back-end sub-packages currently include
 `qscql` (Cassandra/Scylla), `qsldb` (goleveldb), `qspgx` (PostgreSQL), and `qsmy` (MySQL).
