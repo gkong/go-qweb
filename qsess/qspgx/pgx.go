@@ -62,12 +62,12 @@ func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherke
 		return st, pgxErr{"NewPgxStore - CREATE TABLE failed - ", err}
 	}
 
-	_, err = pdb.Exec(noctx, `CREATE INDEX `+tableName+`_userid ON `+tableName+` (userid)`)
+	_, err = pdb.Exec(noctx, `CREATE INDEX IF NOT EXISTS `+tableName+`_userid ON `+tableName+` (userid)`)
 	if err != nil {
 		return st, pgxErr{"NewPgxStore - CREATE userid index failed - ", err}
 	}
 
-	_, err = pdb.Exec(noctx, `CREATE INDEX `+tableName+`_expires ON `+tableName+` (expires)`)
+	_, err = pdb.Exec(noctx, `CREATE INDEX IF NOT EXISTS `+tableName+`_expires ON `+tableName+` (expires)`)
 	if err != nil {
 		return st, pgxErr{"NewPgxStore - CREATE userid index failed - ", err}
 	}
