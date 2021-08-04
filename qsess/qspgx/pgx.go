@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/gkong/go-qweb/qsess"
@@ -103,7 +104,7 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 		var newID uint32
 
 		row := ps.db.QueryRow(noctx, `INSERT INTO `+ps.table+
-			` (data, userid, expires, maxage, minrefresh) VALUES($1, $2, NOW() + INTERVAL '$3 seconds', $3, $4) RETURNING id`,
+			` (data, userid, expires, maxage, minrefresh) VALUES($1, $2, NOW() + INTERVAL '`+strconv.Itoa(maxAgeSecs)+` seconds', $3, $4) RETURNING id`,
 			data, userID, maxAgeSecs, minRefreshSecs)
 		if err := row.Scan(&newID); err != nil {
 			return pgxErr{"pgxStore.Save - row.Scan failed - ", err}
@@ -114,7 +115,7 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 		// id is NOT nil: it refers to an existing record; update it.
 
 		cmdtag, err := ps.db.Exec(noctx, `UPDATE `+ps.table+
-			` SET data = $1, userid = $2, expires = NOW() + INTERVAL '$3 seconds', maxage = $3, minrefresh = $4 WHERE id = $5`,
+			` SET data = $1, userid = $2, expires = NOW() + INTERVAL '`+strconv.Itoa(maxAgeSecs)+` seconds', maxage = $3, minrefresh = $4 WHERE id = $5`,
 			data, userID, maxAgeSecs, minRefreshSecs, bytesToSessID(*sessID))
 		if err != nil {
 			return pgxErr{"pgxStore.Save - UPDATE failed - ", err}
