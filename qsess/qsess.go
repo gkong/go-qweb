@@ -105,6 +105,7 @@ type Store struct {
 	CookiePath     string
 	CookieSecure   bool
 	CookieHTTPOnly bool
+	CookieSameSite http.SameSite
 
 	// AuthType specifies how sessions are stored in the client (cookies or tokens).
 	AuthType AuthTypeEnum
@@ -148,6 +149,7 @@ const (
 	DefaultCookiePath     = "/"
 	DefaultCookieSecure   = false
 	DefaultCookieHTTPOnly = true
+	DefaultCookieSameSite = http.SameSiteDefaultMode
 )
 
 // NewStore is exported only for use by back-ends.
@@ -167,6 +169,7 @@ func NewStore(backend SessBackEnd, uidToClient bool, cipherkeys ...[]byte) (*Sto
 		CookiePath:     DefaultCookiePath,
 		CookieSecure:   DefaultCookieSecure,
 		CookieHTTPOnly: DefaultCookieHTTPOnly,
+		CookieSameSite: DefaultCookieSameSite,
 		NewSessData:    newVarMap,
 
 		backEnd:     backend,
@@ -476,6 +479,7 @@ func (s *Session) newCookie(value string) *http.Cookie {
 		MaxAge:   s.MaxAgeSecs,
 		Secure:   st.CookieSecure,
 		HttpOnly: st.CookieHTTPOnly,
+		SameSite: st.CookieSameSite,
 	}
 
 	return c
