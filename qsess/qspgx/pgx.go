@@ -29,10 +29,10 @@ type pgxStore struct {
 	table string
 
 	// SQL strings which can be precomputed, saving string concatenation
-	pGetQuery string
-	pGetDelete string
-	pDeleteSQL string
-	pDeleteByUserID string
+	pGetQuerySQL       string
+	pGetDeleteSQL      string
+	pDeleteSQL         string
+	pDeleteByUserIDSQL string
 }
 
 // NewPgxStore creates a new session store, using a PostgreSQL database accessed via pgxpool.
@@ -45,12 +45,12 @@ type pgxStore struct {
 // Additional configuration options can be set by manipulating fields in the returned qsess.Store.
 func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherkeys ...[]byte) (*qsess.Store, error) {
 	ps := &pgxStore{
-		db: pdb,
-		table: tableName,
-		pGetQuerySQL: `SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM `+tableName+` WHERE id = $1`,
-		pGetDeleteSQL: `DELETE FROM `+tableName+` WHERE id = $1`,
-		pDeleteSQL: `DELETE FROM `+tableName+` WHERE id = $1`,
-		pDeleteByUserID: `DELETE FROM `+tableName+` WHERE userid = $1`
+		db:                 pdb,
+		table:              tableName,
+		pGetQuerySQL:       `SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM ` + tableName + ` WHERE id = $1`,
+		pGetDeleteSQL:      `DELETE FROM ` + tableName + ` WHERE id = $1`,
+		pDeleteSQL:         `DELETE FROM ` + tableName + ` WHERE id = $1`,
+		pDeleteByUserIDSQL: `DELETE FROM ` + tableName + ` WHERE userid = $1`,
 	}
 
 	st, err := qsess.NewStore(ps, false, cipherkeys...)
@@ -148,7 +148,7 @@ func (ps *pgxStore) Delete(sessID []byte, uidNOTUSED []byte) error {
 }
 
 func (ps *pgxStore) DeleteByUserID(userID []byte) error {
-	if _, err := ps.db.Exec(noctx, ps.pDeleteByUserID, userID); err != nil {
+	if _, err := ps.db.Exec(noctx, ps.pDeleteByUserIDSQL, userID); err != nil {
 		return pgxErr{"pgxStore.DeleteByUserID - DELETE failed - ", err}
 	}
 	return nil
