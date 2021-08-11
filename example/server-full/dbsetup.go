@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -13,13 +14,17 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gocql/gocql"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
 var (
 	gldb *leveldb.DB
+	pdb  *pgxpool.Pool
 	sdb  *sql.DB
 	cdb  *gocql.Session
+
+	noctx = context.Background()
 )
 
 type dbTypeEnum int
@@ -29,6 +34,7 @@ const (
 	goleveldbDB
 	cassandraDB
 	mysqlDB
+	postgresqlDB
 )
 
 func (dbt dbTypeEnum) String() string {
@@ -37,6 +43,8 @@ func (dbt dbTypeEnum) String() string {
 		return "goleveldb"
 	case cassandraDB:
 		return "cassandra"
+	case postgresqlDB:
+		return "postgresql"
 	case mysqlDB:
 		return "mysql"
 	case mapDB:
@@ -54,6 +62,8 @@ func parseDbType(s string) (dbt dbTypeEnum, err error) {
 		dbt = goleveldbDB
 	case "cassandra":
 		dbt = cassandraDB
+	case "postgresql":
+		dbt = postgresqlDB
 	case "mysql":
 		dbt = mysqlDB
 	default:
@@ -68,6 +78,8 @@ func dbSetup(dbt dbTypeEnum) {
 		gldbSetup()
 	case cassandraDB:
 		cassandraSetup()
+	case postgresqlDB:
+		postgresqlSetup()
 	case mysqlDB:
 		mysqlSetup()
 	case mapDB:
@@ -84,6 +96,9 @@ func dbClose() {
 	}
 	if cdb != nil {
 		cdb.Close()
+	}
+	if pdb != nil {
+		pdb.Close()
 	}
 }
 
@@ -123,13 +138,41 @@ func mysqlSetup() {
 		return
 	}
 
-	s := fmt.Sprintf("%s:%s@/%s?parseTime=true", Config.Mysql.User,
-		Config.Mysql.Password, Config.Mysql.Database)
+	s := fmt.Sprintf("%s:%s@/%s?parseTime=true", Config.Mysql.User, Config.Mysql.Password, Config.Mysql.Database)
 	if sdb, err = sql.Open("mysql", s); err != nil {
 		log.Fatalln("sql.Open failed")
 	}
-	sdb.SetMaxOpenConns(20000)
-	sdb.SetMaxIdleConns(20000)
+
+	sdb.SetMaxOpenConns(Config.Mysql.MaxOpenConns)
+	sdb.SetMaxIdleConns(Config.Mysql.MaxIdleConns)
+}
+
+// postgresql - must have postgresql installed and running and set up as follows.
+// (these names are all configurable in config.toml)
+//     sudo -u postgres psql
+//     create user spatestuser with password 'hello';
+//     create database testspa;
+//     grant all privileges on database testspa to spatestuser;
+func postgresqlSetup() {
+	var err error
+
+	if pdb != nil {
+		return
+	}
+
+	url := fmt.Sprintf("postgresql://%s:%s@localhost:5432/%s", Config.Postgresql.User, Config.Postgresql.Password, Config.Postgresql.Database)
+
+	pcfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		log.Fatalln("pgxpool.ParseConfig failed - " + err.Error())
+	}
+
+	pcfg.MaxConns = int32(Config.Postgresql.MaxConns)
+
+	pdb, err = pgxpool.ConnectConfig(noctx, pcfg)
+	if err != nil {
+		log.Fatalln("pgxpool.ConnectConfig failed - " + err.Error())
+	}
 }
 
 // cassandra - must have cassandra installed and running.

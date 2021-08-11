@@ -54,6 +54,8 @@ func pwSetup(dbt dbTypeEnum) {
 		cassPwStore()
 		pwAdd = addPwFunc(cassAddPw)
 		pwAuth = authFunc(cassAuth)
+	case postgresqlDB:
+		panic("no postgresql password store")
 	case mysqlDB:
 		panic("no mysql password store")
 	case mapDB:

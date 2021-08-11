@@ -23,6 +23,13 @@ dbFile = "./0-GLDB-database"
 sessKeyPrefix = [ 255 ]
 passwdKeyPrefix = [ 254 ]
 
+[postgresql]
+user = "spatestuser"
+password = "hello"
+database = "testspa"
+sessTableName = "session"
+maxConns = 5000
+
 [mysql]
 user = "spaTestUser"
 password = "hello"

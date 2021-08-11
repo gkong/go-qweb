@@ -11,6 +11,7 @@ import (
 	"github.com/gkong/go-qweb/qsess/qscql"
 	"github.com/gkong/go-qweb/qsess/qsldb"
 	"github.com/gkong/go-qweb/qsess/qsmy"
+	"github.com/gkong/go-qweb/qsess/qspgx"
 )
 
 var qsStore *qsess.Store
@@ -24,6 +25,8 @@ func sessSetup(dbt dbTypeEnum) {
 		gldbSessStore()
 	case cassandraDB:
 		cassandraSessStore()
+	case postgresqlDB:
+		postgresqlSessStore()
 	case mysqlDB:
 		mysqlSessStore()
 	case mapDB:
@@ -48,7 +51,7 @@ func mapSessStore() {
 
 	qsStore, err = qsess.NewMapStore([]byte(Config.Qsess.EncryptKey))
 	if err != nil {
-		log.Fatalln("mapSessSetup - NewCqlStore failed - " + err.Error())
+		log.Fatalln("mapSessStore - NewMapStore failed - " + err.Error())
 	}
 
 	sessParams()
@@ -60,7 +63,7 @@ func gldbSessStore() {
 	qsStore, err = qsldb.NewGldbStore(gldb, istobs(Config.Goleveldb.SessKeyPrefix),
 		os.Stderr, []byte(Config.Qsess.EncryptKey))
 	if err != nil {
-		log.Fatalln("gldbSessSetup - NewGldbStore failed - " + err.Error())
+		log.Fatalln("gldbSessStore - NewGldbStore failed - " + err.Error())
 	}
 
 	sessParams()
@@ -73,7 +76,19 @@ func cassandraSessStore() {
 		Config.Cassandra.SessUIDIndex, Config.Cassandra.SessUIDToClient,
 		[]byte(Config.Qsess.EncryptKey))
 	if err != nil {
-		log.Fatalln("cqlSessSetup - NewCqlStore failed - " + err.Error())
+		log.Fatalln("cassandraSessStore - NewCqlStore failed - " + err.Error())
+	}
+
+	sessParams()
+}
+
+func postgresqlSessStore() {
+	var err error
+
+	qsStore, err = qspgx.NewPgxStore(pdb, Config.Postgresql.SessTableName, os.Stderr,
+		[]byte(Config.Qsess.EncryptKey))
+	if err != nil {
+		log.Fatalln("postgresqlSessStore - NewPgxStore failed - " + err.Error())
 	}
 
 	sessParams()
@@ -86,7 +101,7 @@ func mysqlSessStore() {
 		Config.Mysql.SessDataColDef, Config.Mysql.SessUIDColDef,
 		[]byte(Config.Qsess.EncryptKey))
 	if err != nil {
-		log.Fatalln("sqlSessSetup - NewMysqlStore failed - " + err.Error())
+		log.Fatalln("mysqlSessStore - NewMysqlStore failed - " + err.Error())
 	}
 
 	sessParams()

@@ -115,17 +115,19 @@ activity and periods of rest with login/logout.
 
 ### exercise all database back-ends
 
-	# install databases you want to exercise: mysql, cassandra (or scyllaDB)
-	# goleveldb, the default database, needs no installation; it's just vendored code
+	# install databases you want to exercise: postgresql, mysql, cassandra (or scyllaDB)
+	# goleveldb needs no installation; it's just a go module, compiled into your application
+	# setup up postgresql according to instructions in qspgx/pgx_test.go
 	# set up mysql according to instructions in qsmy/mysql_test.go
 	# to test individual database back-ends, run "go test" in each of these places:
 		qsess
 		qsess/qscql
 		qsess/qsldb
+		qsess/qspgx
 		qsess/qsmy
 
 	cd example/server-full
-	# set up mysql according to instructions in example/server-full/dbsetup.go.
+	# set up postgresql and mysql according to instructions in example/server-full/dbsetup.go.
 	# if using scyllaDB, edit server-full/config.toml and set protoversion to 3.
 	# make sure the example server is not running in any other window.
 	go build

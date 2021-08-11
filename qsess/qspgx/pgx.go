@@ -27,6 +27,12 @@ var noctx = context.Background()
 type pgxStore struct {
 	db    *pgxpool.Pool
 	table string
+
+	// SQL strings which can be precomputed, saving string concatenation
+	pGetQuery string
+	pGetDelete string
+	pDeleteSQL string
+	pDeleteByUserID string
 }
 
 // NewPgxStore creates a new session store, using a PostgreSQL database accessed via pgxpool.
@@ -38,7 +44,14 @@ type pgxStore struct {
 //
 // Additional configuration options can be set by manipulating fields in the returned qsess.Store.
 func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherkeys ...[]byte) (*qsess.Store, error) {
-	ps := &pgxStore{db: pdb, table: tableName}
+	ps := &pgxStore{
+		db: pdb,
+		table: tableName,
+		pGetQuerySQL: `SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM `+tableName+` WHERE id = $1`,
+		pGetDeleteSQL: `DELETE FROM `+tableName+` WHERE id = $1`,
+		pDeleteSQL: `DELETE FROM `+tableName+` WHERE id = $1`,
+		pDeleteByUserID: `DELETE FROM `+tableName+` WHERE userid = $1`
+	}
 
 	st, err := qsess.NewStore(ps, false, cipherkeys...)
 	if err != nil {
@@ -81,15 +94,13 @@ func (ps *pgxStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, 
 	var data, userID []byte
 	var ttl, maxage, minrefresh int
 
-	row := ps.db.QueryRow(noctx,
-		`SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM `+
-			ps.table+` WHERE id = $1`, sessID)
+	row := ps.db.QueryRow(noctx, ps.pGetQuerySQL, sessID)
 	if err := row.Scan(&data, &userID, &ttl, &maxage, &minrefresh); err != nil {
 		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - row.Scan failed - ", err}
 	}
 
 	if ttl <= 0 {
-		if _, err := ps.db.Exec(noctx, `DELETE FROM `+ps.table+` WHERE id = $1`, sessID); err != nil {
+		if _, err := ps.db.Exec(noctx, ps.pGetDeleteSQL, sessID); err != nil {
 			return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - DELETE failed - ", err}
 		}
 		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - record has expired", nil}
@@ -103,6 +114,7 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 
 		var newID uint32
 
+		// XXX - find a way to make maxAgeSecs a parameter, so we can move the SQL strings into pgxStore and not have to recompute every time
 		row := ps.db.QueryRow(noctx, `INSERT INTO `+ps.table+
 			` (data, userid, expires, maxage, minrefresh) VALUES($1, $2, NOW() + INTERVAL '`+strconv.Itoa(maxAgeSecs)+` seconds', $3, $4) RETURNING id`,
 			data, userID, maxAgeSecs, minRefreshSecs)
@@ -129,14 +141,14 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 }
 
 func (ps *pgxStore) Delete(sessID []byte, uidNOTUSED []byte) error {
-	if _, err := ps.db.Exec(noctx, `DELETE FROM `+ps.table+` WHERE id = $1`, bytesToSessID(sessID)); err != nil {
+	if _, err := ps.db.Exec(noctx, ps.pDeleteSQL, bytesToSessID(sessID)); err != nil {
 		return pgxErr{"pgxStore.Delete - DELETE failed - ", err}
 	}
 	return nil
 }
 
 func (ps *pgxStore) DeleteByUserID(userID []byte) error {
-	if _, err := ps.db.Exec(noctx, `DELETE FROM `+ps.table+` WHERE userid = $1`, userID); err != nil {
+	if _, err := ps.db.Exec(noctx, ps.pDeleteByUserID, userID); err != nil {
 		return pgxErr{"pgxStore.DeleteByUserID - DELETE failed - ", err}
 	}
 	return nil

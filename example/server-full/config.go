@@ -20,10 +20,11 @@ var Config struct {
 	BcryptCost         int    `required:"true"`
 	Logging            bool
 
-	Qsess     ConfigQsess `required:"true"`
-	Goleveldb ConfigGldb
-	Mysql     ConfigMysql
-	Cassandra ConfigCassandra
+	Qsess      ConfigQsess `required:"true"`
+	Goleveldb  ConfigGldb
+	Postgresql ConfigPostgresql
+	Mysql      ConfigMysql
+	Cassandra  ConfigCassandra
 }
 
 type ConfigQsess struct {
@@ -50,6 +51,14 @@ type ConfigMysql struct {
 	SessUIDColDef  string // required if using for session store
 	MaxOpenConns   int
 	MaxIdleConns   int
+}
+
+type ConfigPostgresql struct {
+	User          string `required:"true"`
+	Password      string `required:"true"`
+	Database      string `required:"true"`
+	SessTableName string // required if using for session store
+	MaxConns      int
 }
 
 type ConfigCassandra struct {

@@ -27,6 +27,17 @@ to observe max allowed pending socket connection backlog:
 	cat /proc/sys/net/core/somaxconn
 
 
+PostgreSQL hints
+
+to find the location of the config file
+	sudo -u postgres psql
+	select * from pg_settings where name='config_file';
+
+possible changes to the config file (run "pg_ctl reload" to make the server reload)
+	max_connections = 5000
+	shared_buffers = 1GB
+	max_files_per_process = 10000
+
 MySQL hints
 
 	The following set of hints is not comprehensive, and it may not be current,
