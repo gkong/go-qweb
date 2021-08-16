@@ -107,6 +107,36 @@ func BenchmarkHandWrittenSerializer(b *testing.B) {
 	}
 }
 
+func newJSONData() qsess.SessData {
+	return &JSONData{}
+}
+
+var JSONHasRun bool
+
+func BenchmarkJSON(b *testing.B) {
+	userID := JSONUUID{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5}
+	st, _ := qsess.NewStore(nil, false, []byte("key-to-encrypt------------------"))
+	st.NewSessData = newJSONData
+	var sess struct{ Data qsess.SessData }
+	var sdata *JSONData
+
+	for i := 0; i < b.N; i++ {
+		sess.Data = st.NewSessData()
+		sdata = sess.Data.(*JSONData)
+
+		sdata.Userid = userID
+		sdata.Username = "JohnDoe"
+		sdata.Note = "This is an example string of 43 characters."
+
+		roundTrip(b, sdata)
+	}
+
+	if !JSONHasRun {
+		endMessage = endMessage + fmt.Sprintf("JSON serialized size = %d\n", serSize(b, sdata))
+		JSONHasRun = true
+	}
+}
+
 func newZebraData() qsess.SessData {
 	return &ZebraData{}
 }
