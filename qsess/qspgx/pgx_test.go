@@ -11,7 +11,7 @@ import (
 
 	"github.com/gkong/go-qweb/qsess"
 	"github.com/gkong/go-qweb/qsess/qstest"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var pdb *pgxpool.Pool
@@ -37,7 +37,7 @@ func makeTestStore(t *testing.T, tableName string) *qsess.Store {
 			os.Exit(1)
 		}
 
-		pdb, err = pgxpool.Connect(noctx, url)
+		pdb, err = pgxpool.New(noctx, url)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 			os.Exit(1)

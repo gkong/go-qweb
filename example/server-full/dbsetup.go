@@ -14,7 +14,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gocql/gocql"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
@@ -126,6 +126,7 @@ func gldbDump() {
 
 // mysql - must have mysql installed and running and set up as follows.
 // (these names are all configurable in config.toml)
+//
 //	mysql -u root -p
 //	create database testSPA;
 //	create user 'spaTestUser'@'localhost' identified with mysql_native_password by 'hello';
@@ -149,10 +150,11 @@ func mysqlSetup() {
 
 // postgresql - must have postgresql installed and running and set up as follows.
 // (these names are all configurable in config.toml)
-//     sudo -u postgres psql
-//     create user spatestuser with password 'hello';
-//     create database testspa;
-//     grant all privileges on database testspa to spatestuser;
+//
+//	sudo -u postgres psql
+//	create user spatestuser with password 'hello';
+//	create database testspa;
+//	grant all privileges on database testspa to spatestuser;
 func postgresqlSetup() {
 	var err error
 
@@ -169,9 +171,9 @@ func postgresqlSetup() {
 
 	pcfg.MaxConns = int32(Config.Postgresql.MaxConns)
 
-	pdb, err = pgxpool.ConnectConfig(noctx, pcfg)
+	pdb, err = pgxpool.NewWithConfig(noctx, pcfg)
 	if err != nil {
-		log.Fatalln("pgxpool.ConnectConfig failed - " + err.Error())
+		log.Fatalln("pgxpool.NewWithConfig failed - " + err.Error())
 	}
 }
 
