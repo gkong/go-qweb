@@ -4,6 +4,6 @@ v0.0.0 - 2021-01-12
 This is the initial commit of a project written several years ago, used for some small deployments, and untouched for a couple of years. It recently has been tested against Ubuntu 20.04, go 1.15.6, the Ubuntu repo version of MySQL and Cassandra 3.11.9. It has not yet been tested against the latest versions of the vendored golang dependencies.
 
 
-v0.0.1 - 2024-06-24
+v0.0.3 - 2024-06-24
 
 Updated jackc/pgx from v4 to v5
