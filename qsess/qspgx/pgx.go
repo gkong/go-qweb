@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/gkong/go-qweb/qsess"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const DefaultPruneIntervalSecs = 2 * 60 // prune every 2 minutes
