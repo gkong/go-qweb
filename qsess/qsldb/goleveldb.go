@@ -59,7 +59,9 @@ type gldbStore struct {
 // prefix will be prepended to database keys, so that a session's data can
 // coexist with other data within the database. If the goleveldb database
 // will not be used for anything besides session storage, and there is only
-// a single goleveldb session store, prefix can be empty.
+// a single goleveldb session store, prefix can be empty. It is also the
+// Store.Name, so stores that share keys never accept each other's values
+// (see qsess.Store).
 //
 // cipherkeys are one or more 32-byte encryption keys, to be used with
 // AES-GCM. For encryption, only the first key is used;
@@ -92,6 +94,7 @@ func NewGldbStore(db *leveldb.DB, prefix []byte, errLog io.Writer, cipherkeys ..
 	if err != nil {
 		return nil, gldbErr{"NewGldbStore - NewStore - ", err}
 	}
+	st.Name = string(prefix)
 	st.PruneInterval = make(chan int)
 	st.PruneKill = make(chan int)
 

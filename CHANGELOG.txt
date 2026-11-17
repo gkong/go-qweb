@@ -7,3 +7,14 @@ This is the initial commit of a project written several years ago, used for some
 v0.0.3 - 2024-06-24
 
 Updated jackc/pgx from v4 to v5
+
+
+v0.0.4 - 2026-11-17
+
+qsess: cookies and tokens are now bound to the store that issued them, so stores that share encryption keys no
+longer accept each other's values. Each back-end constructor sets the new Store.Name to where the store keeps its
+sessions (its table name or key prefix), and Name is authenticated into every value. The new Store.Binding is
+authenticated along with Name, for an application that needs to bind values to a deployment or to one copy of a
+database. The new Store.AcceptUnbound, set by default, keeps accepting values issued by earlier versions, so an
+upgrade invalidates nothing; clear it once no such value can still be presented. An earlier version cannot read a
+value issued by this one, so a downgrade invalidates every value issued since the upgrade.

@@ -9,7 +9,9 @@
 package qsess
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"sync"
 	"time"
 )
@@ -48,6 +50,9 @@ func (m *mapStore) uindexAdd(userID string, sessID uint32) {
 // AES-GCM. For encryption, only the first key is used;
 // for decryption all keys are tried (allowing key rotation).
 //
+// Store.Name is random: nothing in a map store outlives the process, and map
+// stores that share keys never accept each other's values.
+//
 // Additional configuration options can be set by manipulating fields in the
 // returned qsess.Store.
 func NewMapStore(cipherkeys ...[]byte) (*Store, error) {
@@ -62,6 +67,12 @@ func NewMapStore(cipherkeys ...[]byte) (*Store, error) {
 	if err != nil {
 		return nil, qsErr{"NewMapStore - NewStore - ", err}
 	}
+
+	name := make([]byte, 8)
+	if _, err := rand.Read(name); err != nil {
+		return nil, qsErr{"NewMapStore - could not create Name", err}
+	}
+	st.Name = hex.EncodeToString(name)
 
 	return st, nil
 }

@@ -38,6 +38,7 @@ type pgxStore struct {
 // NewPgxStore creates a new session store, using a PostgreSQL database accessed via pgxpool.
 //
 // table is the name of a database table to hold session data (it will be created if it doesn't exist).
+// It is also the Store.Name, so stores that share keys never accept each other's values (see qsess.Store).
 //
 // cipherkeys are one or more 32-byte encryption keys, to be used with AES-GCM.
 // For encryption, only the first key is used; for decryption all keys are tried (allowing key rotation).
@@ -57,6 +58,7 @@ func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherke
 	if err != nil {
 		return nil, pgxErr{"NewPgxStore - NewStore - ", err}
 	}
+	st.Name = tableName
 
 	st.PruneInterval = make(chan int)
 	st.PruneKill = make(chan int)

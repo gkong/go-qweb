@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gkong/go-qweb/qsess"
@@ -80,6 +81,62 @@ func TestPgsqlExpiration(t *testing.T) {
 	st := makeTestStore(t, "exp")
 	qstest.ExpirationTest(t, st)
 	dropTestTable(t, "exp")
+}
+
+// TestPgsqlBinding checks that NewPgxStore names a store after its table and that two tables
+// sharing a key keep their values apart. After the TRUNCATE ... RESTART IDENTITY the first row in
+// each table has id 1, so a value from one table refers to a live row in the other, and only Name
+// keeps them apart. Tokens only: the cookie path never reaches the back end and is covered by
+// TestBindingCookies in qsess.
+func TestPgsqlBinding(t *testing.T) {
+	a := makeTestStore(t, "qspgx_binding_a")
+	b := makeTestStore(t, "qspgx_binding_b")
+	if a.Name != "qspgx_binding_a" || b.Name != "qspgx_binding_b" {
+		t.Fatalf("NewPgxStore did not name the stores after their tables: %q, %q", a.Name, b.Name)
+	}
+	a.AuthType = qsess.TokenAuth
+	b.AuthType = qsess.TokenAuth
+	if _, err := pdb.Exec(noctx, "TRUNCATE qspgx_binding_a, qspgx_binding_b RESTART IDENTITY"); err != nil {
+		t.Fatal("TRUNCATE failed - " + err.Error())
+	}
+
+	tokenA := saveBindingToken(t, a)
+	saveBindingToken(t, b)
+	if _, _, err := a.GetTokenSession(tokenA); err != nil {
+		t.Fatal("own token rejected - " + err.Error())
+	}
+	if _, _, err := b.GetTokenSession(tokenA); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("token bound to one table presented to another: not rejected, err = %v", err)
+	}
+
+	// a value issued before Name existed is accepted by default, under the same key, by whichever
+	// table receives it, until AcceptUnbound is cleared
+	a.Name = ""
+	tokenOld := saveBindingToken(t, a)
+	saveBindingToken(t, b)
+	if _, _, err := b.GetTokenSession(tokenOld); err != nil {
+		t.Fatal("unbound token rejected by default - " + err.Error())
+	}
+	b.AcceptUnbound = false
+	if _, _, err := b.GetTokenSession(tokenOld); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("unbound token after AcceptUnbound was cleared: not rejected, err = %v", err)
+	}
+
+	dropTestTable(t, "qspgx_binding_a")
+	dropTestTable(t, "qspgx_binding_b")
+}
+
+// saveBindingToken saves a new session in st and returns its token.
+func saveBindingToken(t *testing.T, st *qsess.Store) string {
+	sess := st.NewSession([]byte("user"))
+	if err := sess.Save(nil); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	token, _, err := sess.Token()
+	if err != nil {
+		t.Fatal("Token failed - " + err.Error())
+	}
+	return token
 }
 
 func TestPgsqlSerializer(t *testing.T) {

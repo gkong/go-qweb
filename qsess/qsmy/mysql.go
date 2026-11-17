@@ -29,7 +29,8 @@ type sqlStore struct {
 // NewMysqlStore creates a new session store, using a MySQL database.
 //
 // table is the name of a database table to hold session data (it will be
-// created if it doesn't exist).
+// created if it doesn't exist). It is also the Store.Name, so stores that
+// share keys never accept each other's values (see qsess.Store).
 //
 // dataField is an SQL column definition for serialized session data,
 // for example, "VARBINARY(500) NOT NULL".
@@ -50,6 +51,7 @@ func NewMysqlStore(sdb *sql.DB, table string, dataField string, uidField string,
 	if err != nil {
 		return nil, myErr{"NewMysqlStore - NewStore - ", err}
 	}
+	st.Name = table
 
 	_, err = sdb.Exec(
 		`CREATE TABLE IF NOT EXISTS ` + table + ` (

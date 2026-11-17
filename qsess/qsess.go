@@ -119,6 +119,20 @@ type Store struct {
 	Encrypt func(data []byte) ([]byte, error)
 	Decrypt func(data []byte) ([]byte, error)
 
+	// Name is where the store keeps its sessions (its table name or key prefix), set by the
+	// constructor and authenticated into every cookie and token value, so that stores sharing
+	// encryption keys never accept each other's values. Change it only before the first Save.
+	Name string
+
+	// Binding is authenticated into every value along with Name. It is empty unless the
+	// application sets it, to bind values to a deployment or to one copy of a database.
+	Binding string
+
+	// AcceptUnbound also accepts values that carry neither Name nor Binding, as every value did
+	// before they existed, from any store that shares the keys. It is set by default; clear it,
+	// at a later restart, once no such value can still be presented.
+	AcceptUnbound bool
+
 	// SessionSaved is an optional callback, which enables you to keep track
 	// of users' last-visited time. This has no effect on session expiration;
 	// it is purely for use by application code. You must supply a userID
@@ -150,6 +164,7 @@ const (
 	DefaultCookieSecure   = false
 	DefaultCookieHTTPOnly = true
 	DefaultCookieSameSite = http.SameSiteDefaultMode
+	DefaultAcceptUnbound  = true
 )
 
 // NewStore is exported only for use by back-ends.
@@ -170,6 +185,7 @@ func NewStore(backend SessBackEnd, uidToClient bool, cipherkeys ...[]byte) (*Sto
 		CookieSecure:   DefaultCookieSecure,
 		CookieHTTPOnly: DefaultCookieHTTPOnly,
 		CookieSameSite: DefaultCookieSameSite,
+		AcceptUnbound:  DefaultAcceptUnbound,
 		NewSessData:    newVarMap,
 
 		backEnd:     backend,

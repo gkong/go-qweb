@@ -76,7 +76,26 @@
 //
 // Multiple Stores can be used simultaneously. For example, one Store can be
 // used to implement login sessions via cookies, while another is used to
-// generate and track sign-up email verification tokens.
+// generate and track sign-up email verification tokens. Nothing in a value
+// identifies the store that issued it, so stores that share encryption keys
+// would accept each other's cookies and tokens, a value from one store
+// referring to the session with the same id in another. Every back-end
+// constructor therefore sets Store.Name to where the store keeps its
+// sessions, its table name or key prefix, and Name is authenticated into
+// every value, so that only a store of the same name accepts it. An
+// application that needs a narrower binding, to one deployment or to one copy
+// of a database, can also set Store.Binding, which is authenticated along
+// with Name. Neither takes effect when Encrypt and Decrypt are supplied.
+//
+// Store.AcceptUnbound, set by default, also accepts values that carry neither
+// Name nor Binding, as every value did before they existed, so an upgrade
+// does not invalidate outstanding cookies and tokens. Clear it, at a later
+// restart, once no such value can still be presented. Cookies, and tokens
+// sent through SendToken, are re-issued on every Save, so for them one
+// maximum session lifetime (the longest Session.MaxAgeSecs in use) is enough.
+// A token obtained through Session.Token is not re-issued: give such clients
+// a new token (Session.Token after GetSession) within that time, or they must
+// sign in again when it ends.
 //
 // Sessions are automatically deleted if not Saved within their expiration
 // times. This package does not refresh sessions (i.e. reset their

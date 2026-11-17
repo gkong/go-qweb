@@ -36,7 +36,7 @@ func (st *Store) encrypt(data []byte) ([]byte, error) {
 		if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
 			return nil, qsErr{"encrypt - could not create nonce", err}
 		}
-		encrypted = st.ciphers[0].Seal(nonce, nonce, data, nil)
+		encrypted = st.ciphers[0].Seal(nonce, nonce, data, st.aad())
 	} else {
 		encrypted, err = st.Encrypt(data)
 		if err != nil {
@@ -63,10 +63,17 @@ func (st *Store) decrypt(data []byte) ([]byte, error) {
 		if len(decoded) < nsize {
 			return nil, qsErr{"decrypt - data too small", nil}
 		}
+		nonce := decoded[:nsize]
+		sealed := decoded[nsize:]
+		aad := st.aad()
 		for _, c := range st.ciphers {
-			decrypted, err := c.Open(nil, decoded[:nsize], decoded[nsize:], nil)
-			if err == nil {
+			if decrypted, err := c.Open(nil, nonce, sealed, aad); err == nil {
 				return decrypted, nil
+			}
+			if aad != nil && st.AcceptUnbound {
+				if decrypted, err := c.Open(nil, nonce, sealed, nil); err == nil {
+					return decrypted, nil
+				}
 			}
 		}
 		return nil, qsErr{"decrypt - could not Open", nil}
@@ -77,4 +84,13 @@ func (st *Store) decrypt(data []byte) ([]byte, error) {
 		}
 		return decrypted, nil
 	}
+}
+
+// aad returns the AEAD additional data, Name + "\x00" + Binding, or nil when both are empty,
+// which is the unbound encoding that values had before Name and Binding existed.
+func (st *Store) aad() []byte {
+	if st.Name == "" && st.Binding == "" {
+		return nil
+	}
+	return []byte(st.Name + "\x00" + st.Binding)
 }

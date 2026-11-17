@@ -8,6 +8,7 @@ import (
 	"flag"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,4 +223,73 @@ func expireTest(t *testing.T, testStore *qsess.Store, gst *gldbStore, usePruner 
 	if has {
 		t.Fatal("record found in userid index; should have been deleted")
 	}
+}
+
+// TestGldbBinding checks that NewGldbStore names a store after its prefix and that two stores
+// sharing one database and one key list keep their values apart. Nothing has to collide for this
+// to matter: a session key carries the prefix of the store that issued it and Get uses the key
+// verbatim, so without Name each store reads the other's records. Tokens only: the cookie path
+// never reaches the back end and is covered by TestBindingCookies in qsess.
+func TestGldbBinding(t *testing.T) {
+	a := gldbTestStore(t) // opens and empties the database
+	defer func() { a.PruneKill <- 0 }()
+	a.AuthType = qsess.TokenAuth
+
+	bPrefix := []byte{3, 4} // same length as testPrefix, so both stores use one key size
+	b := gldbBindingStore(t, bPrefix)
+	defer func() { b.PruneKill <- 0 }()
+
+	if a.Name != string(testPrefix) || b.Name != string(bPrefix) {
+		t.Fatalf("NewGldbStore did not name the stores after their prefixes: %q, %q", a.Name, b.Name)
+	}
+
+	tokenA := gldbSaveToken(t, a)
+	if _, _, err := a.GetTokenSession(tokenA); err != nil {
+		t.Fatal("own token rejected - " + err.Error())
+	}
+	if _, _, err := b.GetTokenSession(tokenA); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("token bound to one prefix presented to another: not rejected, err = %v", err)
+	}
+
+	// a value issued before Name existed carries no binding and is accepted by default by
+	// whichever store receives it, until AcceptUnbound is cleared. Accepting it here means
+	// reading, through b, the record a wrote under a's own prefix.
+	a.Name = ""
+	tokenUnbound := gldbSaveToken(t, a)
+	if _, _, err := b.GetTokenSession(tokenUnbound); err != nil {
+		t.Fatal("unbound token rejected by default - " + err.Error())
+	}
+	b.AcceptUnbound = false
+	if _, _, err := b.GetTokenSession(tokenUnbound); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("unbound token after AcceptUnbound was cleared: not rejected, err = %v", err)
+	}
+}
+
+// gldbBindingStore makes another session store in the test database, with its own prefix and the
+// same keys, leaving the database as it is.
+func gldbBindingStore(t *testing.T, prefix []byte) *qsess.Store {
+	st, err := NewGldbStore(testGldb, prefix, os.Stderr,
+		[]byte("key-to-detect-tampering---------"),
+		[]byte("key-for-encryption--------------"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.MaxAgeSecs = 3600 * 1
+	st.AuthType = qsess.TokenAuth
+
+	return st
+}
+
+// gldbSaveToken saves a new session in st and returns its token.
+func gldbSaveToken(t *testing.T, st *qsess.Store) string {
+	sess := st.NewSession([]byte("user"))
+	if err := sess.Save(nil); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	token, _, err := sess.Token()
+	if err != nil {
+		t.Fatal("Token failed - " + err.Error())
+	}
+	return token
 }

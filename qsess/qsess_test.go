@@ -70,3 +70,35 @@ func TestUidToClient(t *testing.T) {
 
 	sess.Delete(w)
 }
+
+// TestBindingUidToClient tests that Name also covers stores that send user ids to the client
+// (Store.uidToClient), whose values hold more than the session id.
+func TestBindingUidToClient(t *testing.T) {
+	a := makeTestStore(t, false)
+	b := makeTestStore(t, false)
+	a.uidToClient = true
+	a.Name = "a"
+	a.AuthType = TokenAuth
+	b.uidToClient = true
+	b.Name = "b"
+	b.AuthType = TokenAuth
+
+	sa := a.NewSession([]byte("userid-xyzzy"))
+	if err := sa.Save(nil); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	if err := b.NewSession([]byte("userid-xyzzy")).Save(nil); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	token, _, err := sa.Token()
+	if err != nil {
+		t.Fatal("Token failed - " + err.Error())
+	}
+
+	if _, _, err := a.GetTokenSession(token); err != nil {
+		t.Fatal("own token rejected - " + err.Error())
+	}
+	if _, _, err := b.GetTokenSession(token); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("token bound to a presented to b: not rejected, err = %v", err)
+	}
+}

@@ -38,7 +38,8 @@ type cqlStore struct {
 // NewCqlStore creates a new session store, using a cassandra database.
 //
 // table is the name of a database table to hold session data
-// (it will be created if it doesn't exist).
+// (it will be created if it doesn't exist). It is also the Store.Name, so
+// stores that share keys never accept each other's values (see qsess.Store).
 //
 // cipherkeys are one or more 32-byte encryption keys, to be used with
 // AES-GCM. For encryption, only the first key is used;
@@ -96,6 +97,7 @@ func NewCqlStore(gs *gocql.Session, table string, uidIndex bool, uidToClient boo
 	if err != nil {
 		return nil, errors.New("NewCqlStore - NewStore - " + err.Error())
 	}
+	st.Name = table
 
 	return st, nil
 }

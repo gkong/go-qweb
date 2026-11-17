@@ -33,6 +33,7 @@ If the user waits too long, the session automatically expires, invalidating the 
 - session expiration
 - revocation of all sessions for a given user id, for secure password changes
 - back-ends for goleveldb, Cassandra/Scylla, PostgreSQL, MySQL, and a simple, in-memory store
+- binding of cookies and tokens to the store that issued them, so that several stores can share encryption keys
 
 ### zero dependencies
 `qsess` is independent of, but integrates easily with, routers,
