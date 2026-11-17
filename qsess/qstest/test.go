@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,6 +119,84 @@ func ExpirationTest(t *testing.T, store *qsess.Store) {
 	sess, _, getErr = st.GetSession(httptest.NewRecorder(), r)
 	if getErr == nil {
 		t.Fatal("Get succeeded, but session should be expired")
+	}
+}
+
+// ConsumeTest is a back-end-independent test of Store.ConsumeTokenSession, for a back end that
+// implements qsess.Consumer. It checks that the first call returns the session, that a second
+// call and an ordinary Get both fail afterwards, and that of many concurrent calls for one
+// token exactly one succeeds.
+func ConsumeTest(t *testing.T, store *qsess.Store) {
+	st := *store // make a copy, to mess with
+	st.AuthType = qsess.TokenAuth
+
+	msg := "single use only"
+	userid := []byte("userid-consume")
+
+	sess := st.NewSession(userid)
+	sess.MaxAgeSecs = 60
+	sess.Data.(*qsess.VarMap).Vars["note"] = msg
+	if err := sess.Save(httptest.NewRecorder()); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	tok, _, err := sess.Token()
+	if err != nil {
+		t.Fatal("Token failed - " + err.Error())
+	}
+
+	consumed, err := st.ConsumeTokenSession(tok)
+	if err != nil {
+		t.Fatal("ConsumeTokenSession failed - " + err.Error())
+	}
+	if bytes.Compare(consumed.UserID(), userid) != 0 {
+		t.Fatal("ConsumeTokenSession did not return the session's user id")
+	}
+	if consumed.Data.(*qsess.VarMap).Vars["note"].(string) != msg {
+		t.Fatal("ConsumeTokenSession did not return the session's data")
+	}
+	if _, err := st.ConsumeTokenSession(tok); err == nil {
+		t.Fatal("ConsumeTokenSession succeeded twice for one token")
+	}
+	if _, _, err := st.GetTokenSession(tok); err == nil {
+		t.Fatal("GetTokenSession succeeded after the token was consumed")
+	}
+
+	// many presentations of one token at once: exactly one must be redeemed
+	const racers = 8
+
+	sess = st.NewSession(userid)
+	sess.MaxAgeSecs = 60
+	if err := sess.Save(httptest.NewRecorder()); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	if tok, _, err = sess.Token(); err != nil {
+		t.Fatal("Token failed - " + err.Error())
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := st.ConsumeTokenSession(tok)
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	redeemed := 0
+	for err := range results {
+		if err == nil {
+			redeemed++
+		}
+	}
+	if redeemed != 1 {
+		t.Fatalf("%d of %d concurrent ConsumeTokenSession calls succeeded; want exactly 1", redeemed, racers)
 	}
 }
 

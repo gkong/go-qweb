@@ -30,6 +30,7 @@ package qsldb
 
 import (
 	"io"
+	"sync"
 	"time"
 
 	"github.com/gkong/go-qweb/qsess"
@@ -52,6 +53,10 @@ type gldbStore struct {
 
 	sessKeySize int
 	expKeySize  int
+
+	// consumeMu serializes Consume, and only Consume, so that of several concurrent
+	// calls for one session id exactly one finds the record.
+	consumeMu sync.Mutex
 }
 
 // NewGldbStore creates a new session store, using a goleveldb database.
@@ -207,6 +212,49 @@ func (gst *gldbStore) Delete(sessID []byte, uidNOTUSED []byte) error {
 	}
 
 	return nil
+}
+
+// Consume implements qsess.Consumer. Holding consumeMu across the read and the deletes is enough
+// to redeem a session exactly once: goleveldb is embedded and holds the database open
+// exclusively, so this process is the whole of it, and transactions are too expensive here (see
+// the notes at the top of this file).
+//
+// The mutex covers Consume alone. A Save that interleaves with it can still leave an expiration
+// index record with no session record, which is the first of the inconsistencies those notes
+// accept, and the pruner clears it at its expiration time.
+func (gst *gldbStore) Consume(sessID []byte, uidNOTUSED []byte) ([]byte, []byte, int, int, int, error) {
+	gst.consumeMu.Lock()
+	defer gst.consumeMu.Unlock()
+
+	record, err := gst.db.Get(sessID, nil)
+	if err != nil {
+		return []byte{}, []byte{}, 0, 0, 0, gldbErr{"gldbStore.Consume - Get", err}
+	}
+	if len(record) < sessValueFixedPartSize {
+		return []byte{}, []byte{}, 0, 0, 0, gldbErr{"gldbStore.Consume - malformed session record", nil}
+	}
+	sessVal := gldbSessValue(record)
+
+	// sequence: user id index entry, session record, expiration index entry
+	// so we can't leak anything if we get interrupted.
+
+	gst.db.Delete(gst.uidKey(sessVal.userID(), sessID), nil)
+
+	if err := gst.db.Delete(sessID, nil); err != nil {
+		return []byte{}, []byte{}, 0, 0, 0, gldbErr{"gldbStore.Consume - session Delete", err}
+	}
+
+	if err := gst.db.Delete(gst.expKey(sessVal.expirationBytes(), sessID), nil); err != nil {
+		return []byte{}, []byte{}, 0, 0, 0, gldbErr{"gldbStore.Consume - exp index Delete", err}
+	}
+
+	// the session is gone either way, which is what the pruner would have done
+	ttl := sessVal.expiration() - time.Now().Unix()
+	if ttl <= 0 {
+		return []byte{}, []byte{}, 0, 0, 0, gldbErr{"gldbStore.Consume - record has expired", nil}
+	}
+
+	return sessVal.data(), sessVal.userID(), int(ttl), int(sessVal.maxage()), int(sessVal.minrefresh()), nil
 }
 
 func (gst *gldbStore) DeleteByUserID(userID []byte) error {

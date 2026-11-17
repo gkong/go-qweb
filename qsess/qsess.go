@@ -70,6 +70,14 @@ type SessBackEnd interface {
 	DeleteByUserID(userID []byte) error
 }
 
+// Consumer is an optional interface for back ends that can read and delete a session in one
+// atomic operation, so that of several concurrent calls for the same session id exactly one
+// returns the session. Store.ConsumeTokenSession requires it.
+type Consumer interface {
+	Consume(sessID []byte, uID []byte) (data []byte, userID []byte, timeToLiveSecs int,
+		maxAgeSecs int, minRefreshSecs int, err error)
+}
+
 // SessData is an interface for per-session data storage.
 // The default session data type is VarMap.
 // It can be replaced with a custom data type by setting Store.NewSessData.
@@ -301,6 +309,35 @@ func (st *Store) GetTokenSession(token string) (s *Session, timeToLiveSecs int, 
 	return s, ttl, nil
 }
 
+// ConsumeTokenSession returns the session the token refers to and deletes it, so the token
+// cannot be redeemed twice. The returned session is a snapshot: do not Save or Delete it.
+// It returns an error if the back end does not implement Consumer.
+func (st *Store) ConsumeTokenSession(token string) (*Session, error) {
+	consumer, ok := st.backEnd.(Consumer)
+	if !ok {
+		return nil, qsErr{"ConsumeTokenSession - back end does not implement Consumer", nil}
+	}
+
+	s := st.newSess()
+
+	if err := s.decode(token); err != nil {
+		return nil, qsErr{"ConsumeTokenSession - decode - ", err}
+	}
+
+	dbData, userid, _, maxage, minrefresh, err := consumer.Consume(s.sessID, s.userID)
+	if err != nil {
+		return nil, qsErr{"ConsumeTokenSession - no record in db", err}
+	}
+	if err := s.Data.Unmarshal(dbData); err != nil {
+		return nil, qsErr{"ConsumeTokenSession - unmarshal failed", err}
+	}
+
+	s.MaxAgeSecs = maxage
+	s.MinRefreshSecs = minrefresh
+	s.userID = userid
+	return s, nil
+}
+
 // Token returns a token referring to the current session, ready to be given to the client.
 func (s *Session) Token() (token string, timeToLiveSecs int, err error) {
 	_, _, ttl, _, _, err := s.store.backEnd.Get(s.sessID, s.userID)
@@ -379,36 +416,48 @@ func (s *Session) Save(w http.ResponseWriter) error {
 // If you're using cookies, the corresponding cookie is also deleted.
 // If you're using tokens, and you've registered an implementation of
 // DeleteToken, Delete will call it to delete the token from the cient.
+//
+// Deletion succeeds if either delete succeeds. A token store with no
+// DeleteToken function has no way to reach the client's token, so for
+// such a store the database delete is the whole deletion and Delete
+// reports its failure.
 func (s *Session) Delete(w http.ResponseWriter) error {
 	// attempt to delete from database and from client.
 	// if either one succeeds, the session is effectively deleted.
 	// if a zombie database entry is left, back-end will eventually prune it.
 	errDb := s.store.backEnd.Delete(s.sessID, s.userID)
-	errClient := s.deleteFromClient(w)
+	deletedFromClient, errClient := s.deleteFromClient(w)
 
-	// if BOTH failed, return an error.
-	if errDb != nil && errClient != nil {
-		return qsErr{"Delete - database - " + errDb.Error() + " --AND-- client - ", errClient}
+	// if NEITHER delete got rid of the session, return an error.
+	if errDb != nil && !deletedFromClient {
+		if errClient != nil {
+			return qsErr{"Delete - database - " + errDb.Error() + " --AND-- client - ", errClient}
+		}
+		return qsErr{"Delete - database", errDb}
 	}
 
 	return nil
 }
 
-func (s *Session) deleteFromClient(w http.ResponseWriter) error {
+// deleteFromClient deletes the client's copy of the session, reporting whether it did so.
+// It reports false and no error for a token store with no DeleteToken function, which is a
+// supported arrangement - there, the application sends and discards tokens itself.
+func (s *Session) deleteFromClient(w http.ResponseWriter) (bool, error) {
 	st := s.store
 
 	switch st.AuthType {
 	case CookieAuth:
 		s.deleteCookie(w)
 	case TokenAuth:
-		if st.DeleteToken != nil {
-			if err := st.DeleteToken(w); err != nil {
-				return qsErr{"deleteFromClient - DeleteToken failed", err}
-			}
+		if st.DeleteToken == nil {
+			return false, nil
+		}
+		if err := st.DeleteToken(w); err != nil {
+			return false, qsErr{"deleteFromClient - DeleteToken failed", err}
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
 // DeleteByUserID deletes all sessions for the given session's user id.

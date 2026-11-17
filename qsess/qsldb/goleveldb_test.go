@@ -142,6 +142,12 @@ func TestGldbExpiration(t *testing.T) {
 	qstest.ExpirationTest(t, testStore)
 }
 
+func TestGldbConsume(t *testing.T) {
+	testStore := gldbTestStore(t)
+	defer func() { testStore.PruneKill <- 0 }()
+	qstest.ConsumeTest(t, testStore)
+}
+
 func TestGldbExpireIndex(t *testing.T) {
 	testStore := gldbTestStore(t)
 	defer func() { testStore.PruneKill <- 0 }()

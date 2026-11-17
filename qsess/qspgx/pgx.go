@@ -31,6 +31,7 @@ type pgxStore struct {
 	// SQL strings which can be precomputed, saving string concatenation
 	pGetQuerySQL       string
 	pGetDeleteSQL      string
+	pConsumeSQL        string
 	pDeleteSQL         string
 	pDeleteByUserIDSQL string
 }
@@ -46,10 +47,12 @@ type pgxStore struct {
 // Additional configuration options can be set by manipulating fields in the returned qsess.Store.
 func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherkeys ...[]byte) (*qsess.Store, error) {
 	ps := &pgxStore{
-		db:                 pdb,
-		table:              tableName,
-		pGetQuerySQL:       `SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM ` + tableName + ` WHERE id = $1`,
-		pGetDeleteSQL:      `DELETE FROM ` + tableName + ` WHERE id = $1`,
+		db:            pdb,
+		table:         tableName,
+		pGetQuerySQL:  `SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM ` + tableName + ` WHERE id = $1`,
+		pGetDeleteSQL: `DELETE FROM ` + tableName + ` WHERE id = $1`,
+		pConsumeSQL: `DELETE FROM ` + tableName + ` WHERE id = $1` +
+			` RETURNING data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh`,
 		pDeleteSQL:         `DELETE FROM ` + tableName + ` WHERE id = $1`,
 		pDeleteByUserIDSQL: `DELETE FROM ` + tableName + ` WHERE userid = $1`,
 	}
@@ -107,6 +110,26 @@ func (ps *pgxStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, 
 		}
 		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - record has expired", nil}
 	}
+	return data, userID, ttl, maxage, minrefresh, nil
+}
+
+// Consume implements qsess.Consumer. One DELETE ... RETURNING reads and removes the row, so of
+// several concurrent calls for one session id exactly one receives it.
+func (ps *pgxStore) Consume(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, int, int, int, error) {
+	sessID := bytesToSessID(sessIDbytes)
+	var data, userID []byte
+	var ttl, maxage, minrefresh int
+
+	row := ps.db.QueryRow(noctx, ps.pConsumeSQL, sessID)
+	if err := row.Scan(&data, &userID, &ttl, &maxage, &minrefresh); err != nil {
+		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Consume - row.Scan failed - ", err}
+	}
+
+	// the row is gone either way, which is what prune would have done
+	if ttl <= 0 {
+		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Consume - record has expired", nil}
+	}
+
 	return data, userID, ttl, maxage, minrefresh, nil
 }
 

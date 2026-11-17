@@ -83,6 +83,14 @@ func TestPgsqlExpiration(t *testing.T) {
 	dropTestTable(t, "exp")
 }
 
+// TestPgsqlConsume runs the shared ConsumeTokenSession test against PostgreSQL, where the
+// concurrent half of it exercises DELETE ... RETURNING under real row locking.
+func TestPgsqlConsume(t *testing.T) {
+	st := makeTestStore(t, "consume")
+	qstest.ConsumeTest(t, st)
+	dropTestTable(t, "consume")
+}
+
 // TestPgsqlBinding checks that NewPgxStore names a store after its table and that two tables
 // sharing a key keep their values apart. After the TRUNCATE ... RESTART IDENTITY the first row in
 // each table has id 1, so a value from one table refers to a live row in the other, and only Name

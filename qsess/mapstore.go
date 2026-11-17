@@ -96,6 +96,29 @@ func (m *mapStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, i
 	return s.data, []byte(s.userID), int(ttl), s.maxAgeSecs, s.minRefreshSecs, nil
 }
 
+// Consume implements qsess.Consumer. It holds the write lock across the read and the delete,
+// so that of several concurrent calls for one session id exactly one finds it.
+func (m *mapStore) Consume(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, int, int, int, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	sessID := bytesToID(sessIDbytes)
+	s, ok := m.sess[sessID]
+	if !ok {
+		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Consume - id not found", nil}
+	}
+	delete(m.uindex[s.userID], sessID)
+	delete(m.sess, sessID)
+
+	// the session is gone either way, which is what expiration would have done
+	ttl := s.expireTime - time.Now().Unix()
+	if ttl <= 0 {
+		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Consume - record has expired", nil}
+	}
+
+	return s.data, []byte(s.userID), int(ttl), s.maxAgeSecs, s.minRefreshSecs, nil
+}
+
 func (m *mapStore) Save(sessIDbytes *[]byte, data []byte, userIDbytes []byte, maxAgeSecs int, minRefreshSecs int) error {
 	m.Lock()
 	defer m.Unlock()
