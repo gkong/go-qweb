@@ -109,7 +109,8 @@
 // the session and deletes it in one atomic operation, so that of several
 // concurrent presentations of one token exactly one succeeds. It requires a
 // back end that implements Consumer and returns an error otherwise, rather
-// than consuming non-atomically.
+// than consuming non-atomically. The PostgreSQL, goleveldb and in-memory
+// back ends implement Consumer; MySQL and Cassandra do not yet.
 //
 // When a user changes a password, you can revoke all active sessions for
 // the user by calling DeleteByUserID. To use this optional capability,
