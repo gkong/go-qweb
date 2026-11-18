@@ -78,7 +78,7 @@ func (st *Store) decrypt(data []byte) ([]byte, error) {
 		}
 		return nil, qsErr{"decrypt - could not Open", nil}
 	} else {
-		decrypted, err := st.Decrypt(data)
+		decrypted, err := st.Decrypt(decoded)
 		if err != nil {
 			return nil, qsErr{"decrypt - user-supplied Decrypt failed", err}
 		}

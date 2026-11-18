@@ -29,6 +29,7 @@ package qsldb
 //   but it doesn't seem worth the trouble, for such an unlikely scenario.
 
 import (
+	"bytes"
 	"io"
 	"sync"
 	"time"
@@ -167,7 +168,8 @@ func (gst *gldbStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSec
 	// sequence: expiration index entry, session record, user id index entry
 	// so we can't leak anything if we get interrupted.
 
-	if err := gst.db.Put(gst.expKey(sessVal.expirationBytes(), sessKey), []byte{}, nil); err != nil {
+	expKey := gst.expKey(sessVal.expirationBytes(), sessKey)
+	if err := gst.db.Put(expKey, []byte{}, nil); err != nil {
 		return gldbErr{"gldbStore.Save - expiration index Put", err}
 	}
 
@@ -179,7 +181,8 @@ func (gst *gldbStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSec
 		if err := gst.db.Put(gst.uidKey(userID, sessKey), []byte{}, nil); err != nil {
 			return gldbErr{"gldbStore.Save - userid index Put", err}
 		}
-	} else {
+	} else if !bytes.Equal(oldExpKey, expKey) {
+		// a Save within a second of the last one puts the same index record back
 		if err := gst.db.Delete(oldExpKey, nil); err != nil {
 			return gldbErr{"gldbStore.Save - old expiration index Delete", err}
 		}
@@ -263,9 +266,15 @@ func (gst *gldbStore) DeleteByUserID(userID []byte) error {
 	// so just plow ahead, attempting everything, then blithely return nil
 
 	// find sessions using index of sessions by userid
-	iter := gst.db.NewIterator(util.BytesPrefix(gst.uidKeyPrefix(userID)), nil)
+	prefix := gst.uidKeyPrefix(userID)
+	iter := gst.db.NewIterator(util.BytesPrefix(prefix), nil)
 	for iter.Next() {
 		uxkey := gldbUIDKey(iter.Key())
+		// NOTE: nothing in an index key ends the user id, so the scan also finds longer user ids
+		// that begin with this one, and only the key's length tells them apart.
+		if len(uxkey) != len(prefix)+gst.sessKeySize {
+			continue
+		}
 		skey := uxkey.sessKey(gst.prefixSize)
 		expir, expErr := gst.findExpiration(skey)
 		gst.db.Delete(skey, nil)

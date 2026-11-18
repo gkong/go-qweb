@@ -124,6 +124,7 @@ type Store struct {
 	GetToken    func(w http.ResponseWriter, r *http.Request) (token string, err error)
 
 	// Bring-your-own-crypto by registering Encrypt and Decrypt functions.
+	// Decrypt is given what Encrypt returned; the base64 encoding is applied outside them.
 	Encrypt func(data []byte) ([]byte, error)
 	Decrypt func(data []byte) ([]byte, error)
 
@@ -340,6 +341,9 @@ func (st *Store) ConsumeTokenSession(token string) (*Session, error) {
 
 // Token returns a token referring to the current session, ready to be given to the client.
 func (s *Session) Token() (token string, timeToLiveSecs int, err error) {
+	if s.sessID == nil {
+		return "", 0, qsErr{"Token - session has not been saved", nil}
+	}
 	_, _, ttl, _, _, err := s.store.backEnd.Get(s.sessID, s.userID)
 	if err != nil {
 		return "", 0, qsErr{"Token - Get failed", err}
@@ -425,7 +429,11 @@ func (s *Session) Delete(w http.ResponseWriter) error {
 	// attempt to delete from database and from client.
 	// if either one succeeds, the session is effectively deleted.
 	// if a zombie database entry is left, back-end will eventually prune it.
-	errDb := s.store.backEnd.Delete(s.sessID, s.userID)
+	// a session that has never been Saved has no database entry, and no id to give the back-end.
+	var errDb error
+	if s.sessID != nil {
+		errDb = s.store.backEnd.Delete(s.sessID, s.userID)
+	}
 	deletedFromClient, errClient := s.deleteFromClient(w)
 
 	// if NEITHER delete got rid of the session, return an error.

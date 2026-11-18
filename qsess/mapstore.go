@@ -78,22 +78,35 @@ func NewMapStore(cipherkeys ...[]byte) (*Store, error) {
 }
 
 func (m *mapStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, int, int, int, error) {
-	m.RLock()
-	defer m.RUnlock()
-
 	sessID := bytesToID(sessIDbytes)
+
+	m.RLock()
 	s, ok := m.sess[sessID]
+	m.RUnlock()
+
 	if !ok {
 		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Get - id not found", nil}
 	}
 	ttl := s.expireTime - time.Now().Unix()
 	if ttl <= 0 {
-		delete(m.uindex[s.userID], sessID)
-		delete(m.sess, sessID)
+		m.deleteExpired(sessID)
 		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Get - key not found", nil}
 	}
 
 	return s.data, []byte(s.userID), int(ttl), s.maxAgeSecs, s.minRefreshSecs, nil
+}
+
+// deleteExpired checks expiration again under the write lock, because a Save can refresh a
+// session after a reader has found it expired.
+func (m *mapStore) deleteExpired(sessID uint32) {
+	m.Lock()
+	defer m.Unlock()
+
+	s, ok := m.sess[sessID]
+	if ok && s.expireTime <= time.Now().Unix() {
+		delete(m.uindex[s.userID], sessID)
+		delete(m.sess, sessID)
+	}
 }
 
 // Consume implements qsess.Consumer. It holds the write lock across the read and the delete,

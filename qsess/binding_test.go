@@ -6,7 +6,6 @@
 package qsess_test
 
 import (
-	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -213,9 +212,9 @@ func TestBindingHooks(t *testing.T) {
 		encrypts++
 		return data, nil
 	}
-	decrypt := func(data []byte) ([]byte, error) { // Decrypt is given the base64 text of Encrypt's result
+	decrypt := func(data []byte) ([]byte, error) {
 		decrypts++
-		return base64.URLEncoding.DecodeString(string(data))
+		return data, nil
 	}
 	a, _ := bindingStore(t, "a", bindingKey1)
 	b, _ := bindingStore(t, "b", bindingKey1)

@@ -136,6 +136,46 @@ func TestGldbDeleteByUserId(t *testing.T) {
 	qstest.DeleteByUserIDTest(t, testStore, true)
 }
 
+// TestGldbDeleteByUserIDExact checks that DeleteByUserID deletes the sessions of one user id only.
+// The index scan for a user id also finds every longer one that begins with it, which for the empty
+// user id is every session in the store.
+func TestGldbDeleteByUserIDExact(t *testing.T) {
+	testStore := gldbTestStore(t)
+	defer func() { testStore.PruneKill <- 0 }()
+	testStore.AuthType = qsess.TokenAuth
+
+	tokens := make(map[string]string)
+	for _, userID := range []string{"", "a", "ab", "abc", "b"} {
+		sess := testStore.NewSession([]byte(userID))
+		if err := sess.Save(nil); err != nil {
+			t.Fatal("Save failed - " + err.Error())
+		}
+		token, _, err := sess.Token()
+		if err != nil {
+			t.Fatal("Token failed - " + err.Error())
+		}
+		tokens[userID] = token
+	}
+
+	deleted := make(map[string]bool)
+	for _, userID := range []string{"a", "", "ab"} {
+		if err := testStore.NewSession([]byte(userID)).DeleteByUserID(nil); err != nil {
+			t.Fatal("DeleteByUserID failed - " + err.Error())
+		}
+		deleted[userID] = true
+
+		for owner, token := range tokens {
+			_, _, err := testStore.GetTokenSession(token)
+			if deleted[owner] && err == nil {
+				t.Errorf("after DeleteByUserID(%q), user %q still has a session", userID, owner)
+			}
+			if !deleted[owner] && err != nil {
+				t.Errorf("after DeleteByUserID(%q), the session of user %q is gone - %v", userID, owner, err)
+			}
+		}
+	}
+}
+
 func TestGldbExpiration(t *testing.T) {
 	testStore := gldbTestStore(t)
 	defer func() { testStore.PruneKill <- 0 }()
@@ -146,6 +186,57 @@ func TestGldbConsume(t *testing.T) {
 	testStore := gldbTestStore(t)
 	defer func() { testStore.PruneKill <- 0 }()
 	qstest.ConsumeTest(t, testStore)
+}
+
+// TestGldbSaveKeepsExpireIndex checks that a session saved again is still in the expiration index,
+// under its new expiration time only. A second Save within one second leaves the index key as it
+// was, so there is no old record to delete.
+func TestGldbSaveKeepsExpireIndex(t *testing.T) {
+	testStore := gldbTestStore(t)
+	defer func() { testStore.PruneKill <- 0 }()
+	gst, ok := testStore.BackEnd().(*gldbStore)
+	if !ok {
+		t.Fatal("testStore is not a gldbStore")
+	}
+
+	var key gldbSessKey
+	var firstExp []byte
+	var secondExp []byte
+	sameSecond := false
+	for try := 0; try < 10 && !sameSecond; try++ {
+		key = nil
+		firstExp = gldbSaveExpiration(t, gst, &key)
+		secondExp = gldbSaveExpiration(t, gst, &key)
+		sameSecond = bytes.Equal(firstExp, secondExp)
+	}
+	if !sameSecond {
+		t.Fatal("could not save a session twice within one second")
+	}
+	if _, err := testGldb.Get(gst.expKey(secondExp, key), nil); err != nil {
+		t.Fatal("session saved twice within one second is not in the expiration index - " + err.Error())
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	thirdExp := gldbSaveExpiration(t, gst, &key)
+	if _, err := testGldb.Get(gst.expKey(thirdExp, key), nil); err != nil {
+		t.Fatal("session saved again later is not in the expiration index - " + err.Error())
+	}
+	if _, err := testGldb.Get(gst.expKey(secondExp, key), nil); err == nil {
+		t.Fatal("session saved again later is still in the expiration index under its old expiration time")
+	}
+}
+
+// gldbSaveExpiration saves a session through the back end and returns its expiration time as stored.
+func gldbSaveExpiration(t *testing.T, gst *gldbStore, key *gldbSessKey) []byte {
+	if err := gst.Save((*[]byte)(key), []byte{1, 2, 3}, []byte{4, 5, 6}, 1800, 0); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	exp, err := gst.findExpiration(*key)
+	if err != nil {
+		t.Fatal("findExpiration failed - " + err.Error())
+	}
+	return exp
 }
 
 func TestGldbExpireIndex(t *testing.T) {
@@ -159,7 +250,7 @@ func TestGldbExpireIndex(t *testing.T) {
 	// expireTest without pruner
 	expireTest(t, testStore, gst, false)
 
-	// put a mal-formed record into the session expiration index, for pruner
+	// put a record of the wrong length into this store's expiration index range, for pruner
 	badKey := bscat(gst.expPrefix, []byte{4, 5, 6})
 	testGldb.Put(badKey, []byte{}, nil)
 	if _, err := gst.db.Get(badKey, nil); err != nil {
@@ -169,9 +260,66 @@ func TestGldbExpireIndex(t *testing.T) {
 	// expireTest with pruner
 	expireTest(t, testStore, gst, true)
 
-	if _, err := testGldb.Get(badKey, nil); err == nil {
-		t.Error("bad key still there; should have been pruned")
+	// The pruner must leave it alone. A key of the wrong length in this range can equally be
+	// another store's or an application's, and nothing in the key says which.
+	if _, err := testGldb.Get(badKey, nil); err != nil {
+		t.Error("key of the wrong length was pruned, though it cannot be proved to be this store's")
 	}
+}
+
+// TestGldbPrunerLeavesForeignKeys checks that one store's pruner does not delete another store's
+// records. A second store whose prefix extends this store's expiration prefix writes every one of
+// its keys into this store's expiration index range, which NewGldbStore's doc comment invites by
+// offering the prefix as the way for session data to coexist with other data in one database.
+func TestGldbPrunerLeavesForeignKeys(t *testing.T) {
+	storeA := gldbTestStore(t)
+	defer func() { storeA.PruneKill <- 0 }()
+
+	// storeB's prefix is storeA's prefix plus the expiration type byte, so every key storeB
+	// writes begins with storeA's expPrefix.
+	foreignPrefix := bscat(testPrefix, []byte{2})
+	storeB, err := NewGldbStore(testGldb, foreignPrefix, os.Stderr,
+		[]byte("key-for-encryption--------------"),
+	)
+	if err != nil {
+		t.Fatal("NewGldbStore for the second store failed - " + err.Error())
+	}
+	defer func() { storeB.PruneKill <- 0 }()
+	gstB := storeB.BackEnd().(*gldbStore)
+
+	var keyB gldbSessKey
+	if err := gstB.Save((*[]byte)(&keyB), []byte{9}, []byte("userB"), 3600, 0); err != nil {
+		t.Fatal("Save into the second store failed - " + err.Error())
+	}
+
+	before := countKeysWithPrefix(foreignPrefix)
+	if before == 0 {
+		t.Fatal("the second store wrote no keys")
+	}
+
+	storeA.PruneInterval <- 1
+	time.Sleep(3 * time.Second)
+
+	if after := countKeysWithPrefix(foreignPrefix); after != before {
+		t.Errorf("storeA's pruner deleted the second store's records - %d keys before, %d after",
+			before, after)
+	}
+	if _, _, _, _, _, err := gstB.Get(keyB, nil); err != nil {
+		t.Errorf("the second store can no longer read its own session - %v", err)
+	}
+}
+
+func countKeysWithPrefix(prefix []byte) int {
+	n := 0
+	iter := testGldb.NewIterator(nil, nil)
+	for ok := iter.Seek(prefix); ok; ok = iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), prefix) {
+			break
+		}
+		n++
+	}
+	iter.Release()
+	return n
 }
 
 func expireTest(t *testing.T, testStore *qsess.Store, gst *gldbStore, usePruner bool) {
@@ -228,6 +376,57 @@ func expireTest(t *testing.T, testStore *qsess.Store, gst *gldbStore, usePruner 
 	has, err = testGldb.Has(ukey, nil)
 	if has {
 		t.Fatal("record found in userid index; should have been deleted")
+	}
+}
+
+// TestGldbPruneUnordered checks that the pruner reaches expired sessions whose expiration index
+// records sort behind those of unexpired ones. The long-lived sessions expire in more than 256
+// consecutive seconds, so that some of their records sort first whatever the clock says.
+func TestGldbPruneUnordered(t *testing.T) {
+	testStore := gldbTestStore(t)
+	defer func() { testStore.PruneKill <- 0 }()
+	gst, ok := testStore.BackEnd().(*gldbStore)
+	if !ok {
+		t.Fatal("testStore is not a gldbStore")
+	}
+
+	longLived := make([]gldbSessKey, 260)
+	for i := range longLived {
+		if err := gst.Save((*[]byte)(&longLived[i]), []byte{1, 2, 3}, []byte{4, 5, 6}, 3600+i, 0); err != nil {
+			t.Fatal("Save failed - " + err.Error())
+		}
+	}
+	// two of them, expiring in different seconds, because one alone could happen to sort first
+	expiring := make([]gldbSessKey, 2)
+	for i := range expiring {
+		if err := gst.Save((*[]byte)(&expiring[i]), []byte{1, 2, 3}, []byte{4, 5, 6}, 1+i, 0); err != nil {
+			t.Fatal("Save failed - " + err.Error())
+		}
+	}
+
+	testStore.PruneInterval <- 1
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		remaining := 0
+		for _, key := range expiring {
+			if has, _ := testGldb.Has(key, nil); has {
+				remaining++
+			}
+		}
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pruner left %d of %d expired sessions", remaining, len(expiring))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	for _, key := range longLived {
+		if has, _ := testGldb.Has(key, nil); !has {
+			t.Fatal("pruner deleted a session that has not expired")
+		}
 	}
 }
 

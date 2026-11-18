@@ -6,7 +6,10 @@
 package qsess_test
 
 import (
+	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gkong/go-qweb/qsess"
 	"github.com/gkong/go-qweb/qsess/qstest"
@@ -44,4 +47,50 @@ func TestMapDeleteByUserId(t *testing.T) {
 func TestMapExpiration(t *testing.T) {
 	st := makeTestStore(t, false)
 	qstest.ExpirationTest(t, st)
+}
+
+// TestMapConcurrentExpiredGet presents many expired sessions at once. Get deletes a session it
+// finds expired, which it must not do under the lock that concurrent readers share.
+func TestMapConcurrentExpiredGet(t *testing.T) {
+	const sessions = 4000
+
+	st := makeTestStore(t, false)
+	st.AuthType = qsess.TokenAuth
+	tokens := make([]string, 0, sessions)
+	st.SendToken = func(token string, timeToLiveSecs int, w http.ResponseWriter) error {
+		tokens = append(tokens, token)
+		return nil
+	}
+
+	for i := 0; i < sessions; i++ {
+		sess := st.NewSession([]byte("user"))
+		sess.MaxAgeSecs = 1
+		if err := sess.Save(nil); err != nil {
+			t.Fatal("Save failed - " + err.Error())
+		}
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan error, sessions)
+	for _, token := range tokens {
+		wg.Add(1)
+		go func(token string) {
+			defer wg.Done()
+			<-start
+			_, _, err := st.GetTokenSession(token)
+			results <- err
+		}(token)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for err := range results {
+		if err == nil {
+			t.Fatal("GetTokenSession succeeded for an expired session")
+		}
+	}
 }

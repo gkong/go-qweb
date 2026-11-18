@@ -28,24 +28,27 @@ func (gst *gldbStore) prune(waitSecs int, pruneInterval <-chan int, pruneKill <-
 
 		now := time.Now().Unix()
 		iter := gst.db.NewIterator(nil, nil)
-		// Giving Seek the key prefix brings us to the first record of the
-		// expiration index, which is ordered by expiration time (ascending).
+		// Giving Seek the key prefix brings us to the first record of the expiration index.
 		for ok := iter.Seek(gst.expPrefix); ok; ok = iter.Next() {
 			eKey := gldbExpKey(iter.Key())
-			if bytes.Compare(eKey[:gst.prefixSize], gst.expPrefix) != 0 {
+			if !bytes.HasPrefix(eKey, gst.expPrefix) {
 				// we're past the last session expiration index record
 				break
 			}
 			if len(eKey) != gst.expKeySize {
+				// Not one of this store's index records. Another store whose prefix extends
+				// ours sorts into this range, as does an application key, and nothing in the
+				// key says whose it is, so leave it alone rather than delete data that cannot
+				// be proved to be ours. The collision is a setup error, hence the log line.
 				if log != nil {
-					fmt.Fprintf(log, "qsess.Store.prune - pruning malformed expKey - %x", eKey)
+					fmt.Fprintf(log, "qsldb.prune - key in expiration index range is not this store's - %x\n", eKey)
 				}
-				gst.db.Delete(eKey, nil)
 				continue
 			}
 			if eKey.expiration(gst.prefixSize) >= now {
-				// we're past the records of interest
-				break
+				// NOTE: keys hold the expiration time little-endian, so the index is not in
+				// expiration order and expired records can follow this one.
+				continue
 			}
 			// Current eKey's expiration time is in the past.
 			// Read the session record and verify it's really expired,

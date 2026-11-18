@@ -27,3 +27,35 @@ several concurrent presentations of a single-use token exactly one succeeds. It 
 back-end interface, which the PostgreSQL, goleveldb and in-memory back ends implement; for MySQL and Cassandra,
 which do not, it returns an error. Session.Delete no longer returns nil when the database delete fails and there is
 nothing to delete from the client, as was the case for a token store with no DeleteToken function.
+
+
+v0.0.6 - 2026-11-18
+
+qsess: six defects found in a review of the session code.
+
+mapStore.Get deleted expired sessions from its maps while holding only a read lock, which aborts the process with
+"concurrent map writes" when expired values are presented concurrently; it now deletes under the write lock,
+re-checking the expiration.
+
+The goleveldb DeleteByUserID matched user ids by prefix, so deleting the sessions of user "a" also deleted those of
+user "ab", and an empty user id deleted every session in the store; it now matches exactly, with no change to the
+stored key format.
+
+The goleveldb pruner deleted any key in its expiration index range whose length was wrong, which destroyed the
+records of a second store whose prefix extended this one's, and any application data stored under the same prefix;
+it now leaves alone, and logs, a key it cannot identify as its own.
+
+Two Saves of one session within the same second deleted the goleveldb expiration index record that the second Save
+had just written, leaking the session; the old index key is now deleted only when it differs from the new one.
+
+The goleveldb pruner stopped at the first unexpired record, but the index is keyed by a little-endian expiration
+time and so is not ordered by expiration, which could leave expired sessions unreclaimed indefinitely; it now
+carries on past them. Records already orphaned in existing stores are not repaired.
+
+Session.Delete and Session.Token no longer panic on a session that was never Saved: Token returns an error, and
+Delete deletes the client's copy and skips the database.
+
+Breaking change, and only for an application that supplies its own Encrypt and Decrypt: Decrypt now receives the
+base64-decoded bytes, which is what Encrypt returned, so a symmetric pair round-trips. Such an application must
+remove any base64 decode of its own, after which the values it issued earlier are accepted again. The value format
+and the default AES-GCM path are unaffected.
