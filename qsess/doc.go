@@ -72,7 +72,9 @@
 // GetToken callback.
 //
 // By default, cookies and tokens are encrypted and authenticated, using
-// AES-GCM. This can be overridden by supplying Encrypt and Decrypt functions.
+// AES-GCM. This can be overridden by supplying Encrypt and Decrypt functions,
+// which must authenticate too: the session ids most back ends issue are
+// guessable, so encryption alone does not stop a client from forging a value.
 //
 // Multiple Stores can be used simultaneously. For example, one Store can be
 // used to implement login sessions via cookies, while another is used to

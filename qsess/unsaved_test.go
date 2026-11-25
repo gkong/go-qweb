@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gkong/go-qweb/qsess"
+	"github.com/gkong/go-qweb/qsess/qstest"
 )
 
 // TestDeleteUnsavedSession checks that Delete, given a session with no id yet, leaves the back end
@@ -31,12 +32,14 @@ func TestDeleteUnsavedSession(t *testing.T) {
 	}
 }
 
-// TestTokenUnsavedSession checks that Token reports an error for a session with no id yet.
+// TestTokenUnsavedSession checks that Token reports a session with no id yet as the application's error.
 func TestTokenUnsavedSession(t *testing.T) {
 	st := makeTestStore(t, false)
 	st.AuthType = qsess.TokenAuth
 
-	if _, _, err := st.NewSession([]byte("user")).Token(); err == nil {
+	_, _, err := st.NewSession([]byte("user")).Token()
+	if err == nil {
 		t.Fatal("Token succeeded for a session that was never saved")
 	}
+	qstest.MustMatchClass(t, err, qsess.ErrApplication, "Token of a session never saved")
 }

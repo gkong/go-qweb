@@ -7,6 +7,7 @@ package qsess_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,9 +16,13 @@ import (
 	"github.com/gkong/go-qweb/qsess"
 )
 
-// failDeleteBackEnd is a back end whose Delete always fails, so that what Session.Delete reports
-// when the database delete fails can be tested. Only Save, Get and Delete are reached.
-type failDeleteBackEnd struct{}
+var errDBDelete = errors.New("database delete failed")
+
+var errAlreadyGone = fmt.Errorf("%w - record not there", qsess.ErrNotFound)
+
+// failDeleteBackEnd is a back end whose Delete always fails with err, so that what Session.Delete
+// reports when the database delete fails can be tested. Only Save, Get and Delete are reached.
+type failDeleteBackEnd struct{ err error }
 
 func (b failDeleteBackEnd) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs int, minRefreshSecs int) error {
 	*sessID = []byte{1}
@@ -29,16 +34,16 @@ func (b failDeleteBackEnd) Get(sessID []byte, uID []byte) ([]byte, []byte, int, 
 }
 
 func (b failDeleteBackEnd) Delete(sessID []byte, uID []byte) error {
-	return errors.New("database delete failed")
+	return b.err
 }
 
 func (b failDeleteBackEnd) DeleteByUserID(userID []byte) error { return nil }
 
-// failDeleteStore makes a store whose database delete always fails.
-func failDeleteStore(t *testing.T) *qsess.Store {
-	st, err := qsess.NewStore(failDeleteBackEnd{}, false, []byte("key-for-encryption--------------"))
-	if err != nil {
-		t.Fatal("NewStore failed - " + err.Error())
+// failDeleteStore makes a store whose database delete always fails with err.
+func failDeleteStore(t *testing.T, err error) *qsess.Store {
+	st, e := qsess.NewStore(failDeleteBackEnd{err}, false, []byte("key-for-encryption--------------"))
+	if e != nil {
+		t.Fatal("NewStore failed - " + e.Error())
 	}
 	st.NewSessData = nil // this back end keeps no session data
 
@@ -54,14 +59,22 @@ func savedSession(t *testing.T, st *qsess.Store) *qsess.Session {
 	return sess
 }
 
+// cookieDeleted reports whether w holds a Set-Cookie that deletes st's session cookie.
+func cookieDeleted(w *httptest.ResponseRecorder, st *qsess.Store) bool {
+	for _, c := range w.Result().Cookies() {
+		if c.Name == st.CookieName && c.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // TestDeleteReportsFailureWithNoDeleteToken checks that a token store with no DeleteToken
 // function reports a failed database delete instead of returning nil while the session survives.
-// There is no client-side delete to make up for it: the token stays in the client's hands and the
-// record stays in the database.
 // What it reports matters too: the absent DeleteToken is a supported arrangement, not the
 // failure, so the message must name the database and not the missing function.
 func TestDeleteReportsFailureWithNoDeleteToken(t *testing.T) {
-	st := failDeleteStore(t)
+	st := failDeleteStore(t, errDBDelete)
 	st.AuthType = qsess.TokenAuth
 
 	err := savedSession(t, st).Delete(httptest.NewRecorder())
@@ -89,10 +102,11 @@ func TestDeleteSucceedsWithNoDeleteToken(t *testing.T) {
 	}
 }
 
-// TestDeleteWithDeleteToken checks that a registered DeleteToken still absorbs a failed database
-// delete, which is the documented contract: either delete succeeding is enough.
+// TestDeleteWithDeleteToken checks that a registered DeleteToken is still called when the database
+// delete fails, and that its success does not hide the failure: the token it deleted is not the
+// only copy there may be.
 func TestDeleteWithDeleteToken(t *testing.T) {
-	st := failDeleteStore(t)
+	st := failDeleteStore(t, errDBDelete)
 	st.AuthType = qsess.TokenAuth
 	called := false
 	st.DeleteToken = func(w http.ResponseWriter) error {
@@ -100,21 +114,59 @@ func TestDeleteWithDeleteToken(t *testing.T) {
 		return nil
 	}
 
-	if err := savedSession(t, st).Delete(httptest.NewRecorder()); err != nil {
-		t.Fatal("Delete failed although DeleteToken succeeded - " + err.Error())
+	err := savedSession(t, st).Delete(httptest.NewRecorder())
+	if !errors.Is(err, errDBDelete) {
+		t.Fatalf("Delete did not report the failed database delete although DeleteToken succeeded - err = %v", err)
 	}
 	if !called {
 		t.Fatal("DeleteToken was not called")
 	}
 }
 
-// TestDeleteCookieStoreUnchanged checks that cookie stores are unaffected: deleting the cookie
-// still absorbs a failed database delete.
-func TestDeleteCookieStoreUnchanged(t *testing.T) {
-	st := failDeleteStore(t)
+// TestDeleteCookieStoreReportsFailure checks that deleting the cookie does not hide a failed
+// database delete, because a copy of the cookie kept elsewhere is unaffected, and that the cookie is
+// deleted all the same.
+func TestDeleteCookieStoreReportsFailure(t *testing.T) {
+	st := failDeleteStore(t, errDBDelete)
 	st.AuthType = qsess.CookieAuth
 
+	w := httptest.NewRecorder()
+	err := savedSession(t, st).Delete(w)
+	if !errors.Is(err, errDBDelete) {
+		t.Fatalf("Delete did not report the failed database delete for a cookie store - err = %v", err)
+	}
+	if !cookieDeleted(w, st) {
+		t.Fatal("Delete did not delete the cookie")
+	}
+}
+
+// TestDeleteRecordAlreadyGone checks that a record already gone from the database, as a back end
+// reports with ErrNotFound, is not a failure for any kind of store, and that the client's copy is
+// deleted all the same.
+func TestDeleteRecordAlreadyGone(t *testing.T) {
+	st := failDeleteStore(t, errAlreadyGone)
+	st.AuthType = qsess.CookieAuth
+	w := httptest.NewRecorder()
+	if err := savedSession(t, st).Delete(w); err != nil {
+		t.Fatal("Delete failed for a cookie store whose record was already gone - " + err.Error())
+	}
+	if !cookieDeleted(w, st) {
+		t.Fatal("Delete did not delete the cookie")
+	}
+
+	st.AuthType = qsess.TokenAuth
 	if err := savedSession(t, st).Delete(httptest.NewRecorder()); err != nil {
-		t.Fatal("Delete failed for a cookie store although the cookie was deleted - " + err.Error())
+		t.Fatal("Delete failed for a token store whose record was already gone - " + err.Error())
+	}
+	called := false
+	st.DeleteToken = func(w http.ResponseWriter) error {
+		called = true
+		return nil
+	}
+	if err := savedSession(t, st).Delete(httptest.NewRecorder()); err != nil {
+		t.Fatal("Delete failed for a DeleteToken store whose record was already gone - " + err.Error())
+	}
+	if !called {
+		t.Fatal("DeleteToken was not called")
 	}
 }

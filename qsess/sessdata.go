@@ -25,6 +25,13 @@ func (m *VarMap) Marshal() ([]byte, error) {
 }
 
 func (m *VarMap) Unmarshal(b []byte) error {
+	if len(b) == 0 {
+		// what a store keeps for a session saved while NewSessData was nil, which holds no variables to add to m
+		if m.Vars == nil {
+			m.Vars = make(map[interface{}]interface{})
+		}
+		return nil
+	}
 	buf := bytes.NewBuffer(b)
 	dec := gob.NewDecoder(buf)
 	return dec.Decode(&m.Vars)

@@ -60,6 +60,12 @@ func ParseAuthType(s string) (AuthTypeEnum, error) {
 // are not interpreted or modified by code outside of the back-end,
 // and are not visible to users.
 // User ids are application-defined. Back-ends track them for DeleteByUserId.
+//
+// Get and Save report a session id with no live record, because it never existed, was deleted or has expired, by an
+// error that matches ErrNotFound, which qsess reports as ErrInvalidCredential; Delete, and DeleteByUserID for a user
+// id with no sessions, may return nil or such an error, which qsess takes as success. An error that matches one of
+// the four classes listed with ErrNoCredential keeps it, even if it also matches ErrNotFound, and one that matches
+// neither a class nor ErrNotFound is ErrBackEnd.
 type SessBackEnd interface {
 	// Save might have to create and save a new id, so id is passed by reference.
 	Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs int, minRefreshSecs int) error
@@ -72,7 +78,8 @@ type SessBackEnd interface {
 
 // Consumer is an optional interface for back ends that can read and delete a session in one
 // atomic operation, so that of several concurrent calls for the same session id exactly one
-// returns the session. Store.ConsumeTokenSession requires it.
+// returns the session. Store.ConsumeTokenSession requires it, and Consume reports a session id
+// with no live record as Get does.
 type Consumer interface {
 	Consume(sessID []byte, uID []byte) (data []byte, userID []byte, timeToLiveSecs int,
 		maxAgeSecs int, minRefreshSecs int, err error)
@@ -84,6 +91,8 @@ type Consumer interface {
 // See qstest/benchmark_test.go for examples.
 type SessData interface {
 	Marshal() ([]byte, error)
+	// An error from Unmarshal is ErrInvalidCredential unless it matches another class listed with ErrNoCredential,
+	// so that data a store can no longer decode, as after a change to its format, makes its user log in again.
 	Unmarshal([]byte) error
 }
 
@@ -119,11 +128,14 @@ type Store struct {
 	AuthType AuthTypeEnum
 
 	// callbacks for sending/receiving tokens to/from the client.
+	// GetToken returns an empty token, and no error, for a request that carries none.
 	SendToken   func(token string, timeToLiveSecs int, w http.ResponseWriter) error
 	DeleteToken func(w http.ResponseWriter) error
 	GetToken    func(w http.ResponseWriter, r *http.Request) (token string, err error)
 
-	// Bring-your-own-crypto by registering Encrypt and Decrypt functions.
+	// Bring-your-own-crypto by registering Encrypt and Decrypt functions, which must be authenticated
+	// encryption like the default AES-GCM: most back ends' session ids are low-entropy and mostly sequential,
+	// so with confidentiality alone a client can turn its own cookie or token into another session's.
 	// Decrypt is given what Encrypt returned; the base64 encoding is applied outside them.
 	Encrypt func(data []byte) ([]byte, error)
 	Decrypt func(data []byte) ([]byte, error)
@@ -138,8 +150,9 @@ type Store struct {
 	Binding string
 
 	// AcceptUnbound also accepts values that carry neither Name nor Binding, as every value did
-	// before they existed, from any store that shares the keys. It is set by default; clear it,
-	// at a later restart, once no such value can still be presented.
+	// before they existed, from any store that shares the keys, though a back end that tells its
+	// own sessions from another store's, as goleveldb's does, refuses a value that names another's.
+	// It is set by default; clear it, at a later restart, once no such value can still be presented.
 	AcceptUnbound bool
 
 	// SessionSaved is an optional callback, which enables you to keep track
@@ -265,23 +278,28 @@ func (st *Store) GetSession(w http.ResponseWriter, r *http.Request) (s *Session,
 	case CookieAuth:
 		cookie, err := r.Cookie(st.CookieName)
 		if err != nil {
-			return nil, 0, qsErr{"GetSession - no cookie", err}
+			return nil, 0, qsErr{"GetSession - no cookie", classify(ErrNoCredential, err)}
 		}
 		idEncrypted = cookie.Value
 	case TokenAuth:
 		if st.GetToken != nil {
 			tok, err := st.GetToken(w, r)
 			if err != nil {
-				return nil, 0, qsErr{"GetSession - GetToken failed", err}
+				return nil, 0, qsErr{"GetSession - GetToken failed", classify(ErrInvalidCredential, err)}
 			}
 			idEncrypted = tok
 		} else {
 			tok := r.Header.Get("Authorization")
 			if len(tok) < 8 || strings.ToLower(tok[0:7]) != "bearer " {
-				return nil, 0, qsErr{"GetSession - token not present or malformed", nil}
+				return nil, 0, qsErr{"GetSession - token not present or malformed", ErrNoCredential}
 			}
 			idEncrypted = tok[7:]
 		}
+	default:
+		return nil, 0, qsErr{"GetSession - AuthType is neither CookieAuth nor TokenAuth", ErrApplication}
+	}
+	if idEncrypted == "" {
+		return nil, 0, qsErr{"GetSession - empty cookie or token", ErrNoCredential}
 	}
 
 	return st.GetTokenSession(idEncrypted)
@@ -293,15 +311,15 @@ func (st *Store) GetTokenSession(token string) (s *Session, timeToLiveSecs int, 
 	s = st.newSess()
 
 	if err := s.decode(token); err != nil {
-		return nil, 0, qsErr{"GetTokenSession - decode - ", err}
+		return nil, 0, qsErr{"GetTokenSession - decode", classify(ErrInvalidCredential, err)}
 	}
 
 	dbData, userid, ttl, maxage, minrefresh, err := st.backEnd.Get(s.sessID, s.userID)
 	if err != nil {
-		return nil, 0, qsErr{"GetTokenSession - no record in db", err}
+		return nil, 0, qsErr{"GetTokenSession - back-end Get", classifyBackEnd(err)}
 	}
 	if err := s.Data.Unmarshal(dbData); err != nil {
-		return nil, 0, qsErr{"GetTokenSession - unmarshal failed", err}
+		return nil, 0, qsErr{"GetTokenSession - unmarshal failed", classify(ErrInvalidCredential, err)}
 	}
 
 	s.MaxAgeSecs = maxage
@@ -310,27 +328,29 @@ func (st *Store) GetTokenSession(token string) (s *Session, timeToLiveSecs int, 
 	return s, ttl, nil
 }
 
-// ConsumeTokenSession returns the session the token refers to and deletes it, so the token
-// cannot be redeemed twice. The returned session is a snapshot: do not Save or Delete it.
-// It returns an error if the back end does not implement Consumer.
+// ConsumeTokenSession deletes the session the token refers to, so the token cannot be redeemed
+// twice, and returns it unless its data cannot be decoded. The returned session is a snapshot: do
+// not Save or Delete it. It is not implemented for a back end that does not implement Consumer,
+// and says so with an error that matches ErrApplication.
 func (st *Store) ConsumeTokenSession(token string) (*Session, error) {
 	consumer, ok := st.backEnd.(Consumer)
 	if !ok {
-		return nil, qsErr{"ConsumeTokenSession - back end does not implement Consumer", nil}
+		return nil, qsErr{"ConsumeTokenSession - not implemented: the back end does not implement Consumer",
+			ErrApplication}
 	}
 
 	s := st.newSess()
 
 	if err := s.decode(token); err != nil {
-		return nil, qsErr{"ConsumeTokenSession - decode - ", err}
+		return nil, qsErr{"ConsumeTokenSession - decode", classify(ErrInvalidCredential, err)}
 	}
 
 	dbData, userid, _, maxage, minrefresh, err := consumer.Consume(s.sessID, s.userID)
 	if err != nil {
-		return nil, qsErr{"ConsumeTokenSession - no record in db", err}
+		return nil, qsErr{"ConsumeTokenSession - back-end Consume", classifyBackEnd(err)}
 	}
 	if err := s.Data.Unmarshal(dbData); err != nil {
-		return nil, qsErr{"ConsumeTokenSession - unmarshal failed", err}
+		return nil, qsErr{"ConsumeTokenSession - unmarshal failed", classify(ErrInvalidCredential, err)}
 	}
 
 	s.MaxAgeSecs = maxage
@@ -339,18 +359,19 @@ func (st *Store) ConsumeTokenSession(token string) (*Session, error) {
 	return s, nil
 }
 
-// Token returns a token referring to the current session, ready to be given to the client.
+// Token returns a token referring to the current session, which must have been saved, ready to be given to the
+// client.
 func (s *Session) Token() (token string, timeToLiveSecs int, err error) {
 	if s.sessID == nil {
-		return "", 0, qsErr{"Token - session has not been saved", nil}
+		return "", 0, qsErr{"Token - session has not been saved", ErrApplication}
 	}
 	_, _, ttl, _, _, err := s.store.backEnd.Get(s.sessID, s.userID)
 	if err != nil {
-		return "", 0, qsErr{"Token - Get failed", err}
+		return "", 0, qsErr{"Token - back-end Get", classifyBackEnd(err)}
 	}
 	token, err = s.encode()
 	if err != nil {
-		return "", 0, qsErr{"Token - token creation failed", err}
+		return "", 0, qsErr{"Token - token creation failed", classify(ErrApplication, err)}
 	}
 	return token, ttl, nil
 }
@@ -363,7 +384,9 @@ func (s *Session) UserID() []byte {
 }
 
 // Save writes a session's data to the database and refreshes its
-// expiration time.
+// expiration time. A session that has expired, or been deleted, revoked or
+// consumed, cannot be saved again: Save reports ErrInvalidCredential, except
+// on Cassandra, which recreates the session (see qscql.NewCqlStore).
 //
 // If AuthType is CookieAuth, Save writes a cookie containing the session id
 // into the response headers. A call to Save must precede any calls to
@@ -376,40 +399,43 @@ func (s *Session) Save(w http.ResponseWriter) error {
 	st := s.store
 
 	if s.MaxAgeSecs < 1 {
-		return qsErr{"Save - MaxAgeSecs must be positive", nil}
+		return qsErr{"Save - MaxAgeSecs must be positive", ErrApplication}
+	}
+	if st.AuthType != CookieAuth && st.AuthType != TokenAuth {
+		return qsErr{"Save - AuthType is neither CookieAuth nor TokenAuth", ErrApplication}
 	}
 
 	dbData, err := s.Data.Marshal()
 	if err != nil {
-		return qsErr{"Save - marshal failed", err}
+		return qsErr{"Save - marshal failed", classify(ErrApplication, err)}
 	}
 	err = st.backEnd.Save(&s.sessID, dbData, s.userID, s.MaxAgeSecs, s.MinRefreshSecs)
 	if err != nil {
-		return qsErr{"Save - db write failed", err}
+		return qsErr{"Save - back-end Save", classifyBackEnd(err)}
 	}
 
 	switch st.AuthType {
 	case CookieAuth:
 		ckData, err := s.encode()
 		if err != nil {
-			return qsErr{"Save - cookie encode failed", err}
+			return qsErr{"Save - cookie encode failed", classify(ErrApplication, err)}
 		}
 		http.SetCookie(w, s.newCookie(ckData))
 	case TokenAuth:
 		if st.SendToken != nil {
 			tokData, err := s.encode()
 			if err != nil {
-				return qsErr{"Save - token creation failed", err}
+				return qsErr{"Save - token creation failed", classify(ErrApplication, err)}
 			}
 			if err := st.SendToken(tokData, s.MaxAgeSecs, w); err != nil {
-				return qsErr{"Save - SendToken failed", err}
+				return qsErr{"Save - SendToken failed", classify(ErrApplication, err)}
 			}
 		}
 	}
 
 	if st.SessionSaved != nil {
 		if err := st.SessionSaved(s.userID, time.Now()); err != nil {
-			return qsErr{"Save - SessionSaved failed", err}
+			return qsErr{"Save - SessionSaved failed", classify(ErrApplication, err)}
 		}
 	}
 
@@ -421,36 +447,33 @@ func (s *Session) Save(w http.ResponseWriter) error {
 // If you're using tokens, and you've registered an implementation of
 // DeleteToken, Delete will call it to delete the token from the cient.
 //
-// Deletion succeeds if either delete succeeds. A token store with no
-// DeleteToken function has no way to reach the client's token, so for
-// such a store the database delete is the whole deletion and Delete
-// reports its failure.
+// Delete reports a failed database delete even when the client's copy was
+// deleted, because the session stays valid for any other copy, such as a
+// stolen cookie, until its record is gone. A record that is already gone,
+// because the session expired or was deleted before, is not a failure.
 func (s *Session) Delete(w http.ResponseWriter) error {
-	// attempt to delete from database and from client.
-	// if either one succeeds, the session is effectively deleted.
-	// if a zombie database entry is left, back-end will eventually prune it.
 	// a session that has never been Saved has no database entry, and no id to give the back-end.
 	var errDb error
 	if s.sessID != nil {
 		errDb = s.store.backEnd.Delete(s.sessID, s.userID)
 	}
-	deletedFromClient, errClient := s.deleteFromClient(w)
+	errClient := s.deleteFromClient(w)
 
-	// if NEITHER delete got rid of the session, return an error.
-	if errDb != nil && !deletedFromClient {
-		if errClient != nil {
-			return qsErr{"Delete - database - " + errDb.Error() + " --AND-- client - ", errClient}
-		}
-		return qsErr{"Delete - database", errDb}
+	if errDb == nil || isGone(errDb) {
+		return nil
 	}
-
-	return nil
+	errDb = classifyBackEnd(errDb)
+	if errClient != nil {
+		errClient = classify(ErrApplication, errClient)
+		return qsErr{"Delete - database", fmt.Errorf("%w --AND-- client - %w", errDb, errClient)}
+	}
+	return qsErr{"Delete - database", errDb}
 }
 
-// deleteFromClient deletes the client's copy of the session, reporting whether it did so.
-// It reports false and no error for a token store with no DeleteToken function, which is a
-// supported arrangement - there, the application sends and discards tokens itself.
-func (s *Session) deleteFromClient(w http.ResponseWriter) (bool, error) {
+// deleteFromClient deletes the client's copy of the session. A token store with no DeleteToken
+// function has none to delete, which is a supported arrangement - there, the application sends
+// and discards tokens itself.
+func (s *Session) deleteFromClient(w http.ResponseWriter) error {
 	st := s.store
 
 	switch st.AuthType {
@@ -458,14 +481,14 @@ func (s *Session) deleteFromClient(w http.ResponseWriter) (bool, error) {
 		s.deleteCookie(w)
 	case TokenAuth:
 		if st.DeleteToken == nil {
-			return false, nil
+			return nil
 		}
 		if err := st.DeleteToken(w); err != nil {
-			return false, qsErr{"deleteFromClient - DeleteToken failed", err}
+			return qsErr{"deleteFromClient - DeleteToken failed", err}
 		}
 	}
 
-	return true, nil
+	return nil
 }
 
 // DeleteByUserID deletes all sessions for the given session's user id.
@@ -485,8 +508,8 @@ func (s *Session) DeleteByUserID(w http.ResponseWriter) error {
 		s.deleteFromClient(w)
 	}
 
-	if errDb != nil {
-		return qsErr{"DeleteByUserID - back-end - ", errDb}
+	if errDb != nil && !isGone(errDb) {
+		return qsErr{"DeleteByUserID - back-end", classifyBackEnd(errDb)}
 	}
 	return nil
 }
@@ -523,7 +546,7 @@ func (s *Session) encode() (string, error) {
 func (s *Session) decode(token string) error {
 	data, err := s.store.decrypt([]byte(token))
 	if err != nil {
-		return qsErr{"decode - decrypt - ", err}
+		return qsErr{"decode - decrypt", err}
 	}
 	if s.store.uidToClient {
 		// unmarshall session id and user id from decrypted data
@@ -583,4 +606,8 @@ func (e qsErr) Error() string {
 		return "qsess." + e.msg + " - " + e.err.Error()
 	}
 	return "qsess." + e.msg
+}
+
+func (e qsErr) Unwrap() error {
+	return e.err
 }

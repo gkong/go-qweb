@@ -17,6 +17,7 @@ package qscql
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gkong/go-qweb/qsess"
@@ -54,6 +55,10 @@ type cqlStore struct {
 // encrypted userIDs be stored in client cookies/tokens.
 // There is never a reason to set them both to true.
 //
+// Save is an upsert, so unlike the other back ends it recreates a session
+// that has expired, or been deleted or revoked, rather than failing: a request
+// that saves a session while another revokes it can bring the session back.
+//
 // Additional configuration options can be set by manipulating fields in the
 // returned qsess.Store.
 func NewCqlStore(gs *gocql.Session, table string, uidIndex bool, uidToClient bool, cipherkeys ...[]byte) (*qsess.Store, error) {
@@ -83,19 +88,19 @@ func NewCqlStore(gs *gocql.Session, table string, uidIndex bool, uidToClient boo
 		`" ( sessid uuid, userid blob, data blob, maxage int, minrefresh int, PRIMARY KEY ` + key +
 		` ) WITH gc_grace_seconds = 86400 AND compaction = { 'class':'LeveledCompactionStrategy'}`).Exec()
 	if err != nil {
-		return &qsess.Store{}, errors.New("NewCqlStore - CREATE TABLE failed - " + err.Error())
+		return &qsess.Store{}, cqlErr{"NewCqlStore - CREATE TABLE failed", err}
 	}
 
 	if uidIndex {
 		err = gs.Query(`CREATE INDEX IF NOT EXISTS "` + table + `_uid_ndx" ON ` + table + ` (userid)`).Exec()
 		if err != nil {
-			return &qsess.Store{}, errors.New("NewCqlStore - CREATE INDEX failed - " + err.Error())
+			return &qsess.Store{}, cqlErr{"NewCqlStore - CREATE INDEX failed", err}
 		}
 	}
 
 	st, err := qsess.NewStore(cs, uidToClient, cipherkeys...)
 	if err != nil {
-		return nil, errors.New("NewCqlStore - NewStore - " + err.Error())
+		return nil, cqlErr{"NewCqlStore - NewStore", err}
 	}
 	st.Name = table
 
@@ -111,7 +116,14 @@ func (c *cqlStore) Get(sessID []byte, userID []byte) ([]byte, []byte, int, int, 
 	} else {
 		err = c.db.Query(c.qGet).Bind(bytesToID(sessID)).Scan(&data, &userID, &ttl, &maxage, &minrefresh)
 	}
-	return data, userID, ttl, maxage, minrefresh, err
+	if err != nil {
+		// NOTE: an expired session is not found, its TTL having removed the row
+		if errors.Is(err, gocql.ErrNotFound) {
+			err = fmt.Errorf("%w - %w", qsess.ErrNotFound, err)
+		}
+		return []byte{}, []byte{}, 0, 0, 0, cqlErr{"cqlStore.Get - SELECT", err}
+	}
+	return data, userID, ttl, maxage, minrefresh, nil
 }
 
 func (c *cqlStore) Save(sessID *[]byte, data []byte, userID []byte, maxage int, minrefresh int) error {
@@ -119,14 +131,23 @@ func (c *cqlStore) Save(sessID *[]byte, data []byte, userID []byte, maxage int, 
 		// this is the first Save of a new session; generate a new key.
 		*sessID = gocql.UUIDFromTime(time.Now()).Bytes()
 	}
-	return c.db.Query(c.qInsert).Bind(*sessID, userID, data, maxage, minrefresh, maxage).Exec()
+	if err := c.db.Query(c.qInsert).Bind(*sessID, userID, data, maxage, minrefresh, maxage).Exec(); err != nil {
+		return cqlErr{"cqlStore.Save - INSERT failed", err}
+	}
+	return nil
 }
 
 func (c *cqlStore) Delete(sessID []byte, userID []byte) error {
+	var err error
 	if c.uidToClient {
-		return c.db.Query(c.qDelete).Bind(userID, bytesToID(sessID)).Exec()
+		err = c.db.Query(c.qDelete).Bind(userID, bytesToID(sessID)).Exec()
+	} else {
+		err = c.db.Query(c.qDelete).Bind(bytesToID(sessID)).Exec()
 	}
-	return c.db.Query(c.qDelete).Bind(bytesToID(sessID)).Exec()
+	if err != nil {
+		return cqlErr{"cqlStore.Delete - DELETE failed", err}
+	}
+	return nil
 }
 
 func (c *cqlStore) DeleteByUserID(userID []byte) error {
@@ -134,11 +155,14 @@ func (c *cqlStore) DeleteByUserID(userID []byte) error {
 	var err error
 
 	if (!c.uidIndex) && (!c.uidToClient) {
-		return errors.New("cqlStore.DeleteByUserID - require uidIndex or uidToClient")
+		return cqlErr{"cqlStore.DeleteByUserID - require uidIndex or uidToClient", qsess.ErrApplication}
 	}
 
 	if c.uidToClient {
-		return c.db.Query(c.qDelByUID, userID).Exec()
+		if err := c.db.Query(c.qDelByUID, userID).Exec(); err != nil {
+			return cqlErr{"cqlStore.DeleteByUserID - DELETE failed", err}
+		}
+		return nil
 	} else {
 		// even if we have an index, we can't delete using a WHERE clause that
 		// doesn't include the partition key, so do a SELECT and delete each
@@ -157,9 +181,12 @@ func (c *cqlStore) DeleteByUserID(userID []byte) error {
 		}
 		closeErr := iter.Close()
 		if err != nil {
-			return err
+			return cqlErr{"cqlStore.DeleteByUserID - DELETE failed", err}
 		}
-		return closeErr
+		if closeErr != nil {
+			return cqlErr{"cqlStore.DeleteByUserID - SELECT failed", closeErr}
+		}
+		return nil
 	}
 }
 
@@ -169,4 +196,20 @@ func bytesToID(src []byte) gocql.UUID {
 	// could check error return, but depend on qsess promise not to touch
 	u, _ := gocql.UUIDFromBytes(src)
 	return u
+}
+
+type cqlErr struct {
+	msg string
+	err error
+}
+
+func (e cqlErr) Error() string {
+	if e.err != nil {
+		return "qscql." + e.msg + " - " + e.err.Error()
+	}
+	return "qscql." + e.msg
+}
+
+func (e cqlErr) Unwrap() error {
+	return e.err
 }

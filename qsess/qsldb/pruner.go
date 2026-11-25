@@ -5,9 +5,12 @@ package qsldb
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // prune periodically deletes expired sessions from the session store.
@@ -27,6 +30,11 @@ func (gst *gldbStore) prune(waitSecs int, pruneInterval <-chan int, pruneKill <-
 		}
 
 		now := time.Now().Unix()
+		foreign := 0
+		malformed := 0
+		failed := 0
+		var firstForeign, firstMalformed, firstFailed []byte
+		var failedErr error
 		iter := gst.db.NewIterator(nil, nil)
 		// Giving Seek the key prefix brings us to the first record of the expiration index.
 		for ok := iter.Seek(gst.expPrefix); ok; ok = iter.Next() {
@@ -35,14 +43,16 @@ func (gst *gldbStore) prune(waitSecs int, pruneInterval <-chan int, pruneKill <-
 				// we're past the last session expiration index record
 				break
 			}
-			if len(eKey) != gst.expKeySize {
-				// Not one of this store's index records. Another store whose prefix extends
-				// ours sorts into this range, as does an application key, and nothing in the
-				// key says whose it is, so leave it alone rather than delete data that cannot
-				// be proved to be ours. The collision is a setup error, hence the log line.
-				if log != nil {
-					fmt.Fprintf(log, "qsldb.prune - key in expiration index range is not this store's - %x\n", eKey)
+			if len(eKey) != gst.expKeySize || !gst.ownSessKey(eKey.sessKey(gst.prefixSize)) ||
+				len(iter.Value()) != 0 {
+				// Not one of this store's index records, which name one of its session keys and hold no value.
+				// Another store whose prefix extends our expiration prefix sorts into this range, as do an
+				// application key and an index record written for another store's session, so leave it alone
+				// rather than delete data that cannot be proved to be ours, and log it for the operator.
+				if foreign == 0 {
+					firstForeign = bytes.Clone(eKey)
 				}
+				foreign++
 				continue
 			}
 			if eKey.expiration(gst.prefixSize) >= now {
@@ -50,22 +60,64 @@ func (gst *gldbStore) prune(waitSecs int, pruneInterval <-chan int, pruneKill <-
 				// expiration order and expired records can follow this one.
 				continue
 			}
-			// Current eKey's expiration time is in the past.
-			// Read the session record and verify it's really expired,
-			// then delete the session record and index record.
-			// Ignore deletion failures, since other concurrent code can
-			// delete these records.
-			sessKey := eKey.sessKey(gst.prefixSize)
-			data, err := gst.db.Get(sessKey, nil)
-			if err == nil {
-				sessData := gldbSessValue(data)
-				if sessData.expiration() < now {
-					gst.db.Delete(gst.uidKey(sessData.userID(), sessKey), nil)
-					gst.db.Delete(sessKey, nil)
+			isMalformed, err := gst.pruneSession(eKey, now)
+			if isMalformed {
+				if malformed == 0 {
+					firstMalformed = bytes.Clone(eKey)
 				}
+				malformed++
 			}
-			gst.db.Delete(eKey, nil)
+			if err != nil {
+				if failed == 0 {
+					firstFailed = bytes.Clone(eKey)
+					failedErr = err
+				}
+				failed++
+			}
 		}
 		iter.Release()
+
+		if log != nil && foreign > 0 {
+			fmt.Fprintf(log, "qsldb.prune - %d keys in the expiration index range are not this store's index "+
+				"records, the first %x\n", foreign, firstForeign)
+		}
+		if log != nil && malformed > 0 {
+			fmt.Fprintf(log, "qsldb.prune - %d expiration index records name a malformed session record, "+
+				"the first %x\n", malformed, firstMalformed)
+		}
+		if log != nil && failed > 0 {
+			fmt.Fprintf(log, "qsldb.prune - %d expiration index records name a session record that could not be "+
+				"read or deleted, the first %x - %v\n", failed, firstFailed, failedErr)
+		}
 	}
+}
+
+// pruneSession deletes eKey, an expired expiration index record, and the session record it names if that has
+// expired too, holding mu so that a Save cannot refresh the session in between. It reports malformed, deleting
+// nothing, for a session record too short for its fields, which is not provably this store's either, and reports
+// the error, keeping eKey for a later pass, for one that it cannot read or delete.
+func (gst *gldbStore) pruneSession(eKey gldbExpKey, now int64) (malformed bool, err error) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+
+	sessKey := eKey.sessKey(gst.prefixSize)
+	data, err := gst.db.Get(sessKey, nil)
+	if err == nil {
+		sessData := gldbSessValue(data)
+		if !sessData.valid() {
+			return true, nil
+		}
+		if sessData.expiration() < now {
+			err = gst.deleteSession(sessKey, sessData)
+		}
+	} else {
+		err = gldbErr{"gldbStore.pruneSession - Get", err}
+	}
+	if err != nil && !errors.Is(err, leveldb.ErrNotFound) {
+		// eKey may be the last index record to name the session record
+		return false, err
+	}
+	// no session needs eKey now, so a failed delete only leaves it for the next pass
+	gst.db.Delete(eKey, nil)
+	return false, nil
 }

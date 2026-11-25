@@ -59,3 +59,45 @@ Breaking change, and only for an application that supplies its own Encrypt and D
 base64-decoded bytes, which is what Encrypt returned, so a symmetric pair round-trips. Such an application must
 remove any base64 decode of its own, after which the values it issued earlier are accepted again. The value format
 and the default AES-GCM path are unaffected.
+
+
+v0.0.7 - 2026-11-25
+
+The go directive is now go 1.25, raised from go 1.15, so a program that imports this module needs Go 1.25 or later,
+and go get of this release raises the importing module's directive to 1.25, with the language and GODEBUG changes
+that brings. In return, the go command can prune the module graph instead of walking the requirements of every back
+end and of the examples. go.mod also lists the indirect requirements that pruning needs, among them newer versions
+of golang.org/x/sys and github.com/rogpeppe/go-internal.
+
+qsess: errors can be told apart. Each error from getting, saving or deleting a session now matches one of four new
+values, ErrNoCredential, ErrInvalidCredential, ErrBackEnd and ErrApplication, for an application to answer with
+401, 401, 503 and 500. An error from one of the application's own functions keeps any of these classes it matches.
+Error texts have changed, so match errors with errors.Is and errors.As, which now also reach a driver's error.
+
+qsess: an application's own back end must now report a missing or expired session with an error that matches the
+new ErrNotFound, or the miss is reported as ErrBackEnd; qstest's shared tests now check a back end for this and the
+rest of what this release requires. An application's GetToken must return an empty token and no error for a
+request that carries none.
+
+qsess: a session that is gone stays gone. Session.Save of an expired session now fails, as for a deleted one,
+except on Cassandra, whose Save, an upsert, still recreates any session that is gone. Session.Delete now reports a
+failed database delete even when it has deleted the client's copy, and deleting a session that is already gone is
+not a failure.
+
+qsldb: a Save that overlapped a logout, a revocation or a token redemption could bring the session back. Each
+goleveldb store now makes its changes to sessions under a lock of its own, so two stores on one database must not
+share a prefix, and a store refuses any session that another store issued, even one whose value AcceptUnbound lets
+through. Sessions the race already left out of DeleteByUserID's reach are not repaired. DeleteByUserID now reports
+a failure that can leave a session valid, where it always returned nil. It and the pruner no longer delete keys
+that only look like their own, and the pruner no longer panics on a malformed record.
+
+qsess: the in-memory store now deletes expired sessions in a goroutine of its own, so a program that discards map
+stores, such as a test, must send on Store.PruneKill to free each one.
+
+qsess: the documentation now says what was always required: an application's own Store.Encrypt and Store.Decrypt
+must be authenticated encryption, like the default AES-GCM, or, on most back ends, a client can forge another
+session's cookie or token.
+
+qsess: a MySQL Save that changes nothing, as a second Save within a second can, no longer fails. Smaller defects
+across qsess and its back ends are fixed too.
+

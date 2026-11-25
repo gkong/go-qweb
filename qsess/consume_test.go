@@ -7,6 +7,7 @@ package qsess_test
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gkong/go-qweb/qsess"
@@ -55,8 +56,14 @@ func TestConsumeNeedsConsumer(t *testing.T) {
 		t.Fatal("Token failed - " + err.Error())
 	}
 
-	if _, err := st.ConsumeTokenSession(tok); err == nil {
+	_, err = st.ConsumeTokenSession(tok)
+	if err == nil {
 		t.Fatal("ConsumeTokenSession succeeded on a back end that does not implement Consumer")
+	}
+	qstest.MustMatchClass(t, err, qsess.ErrApplication, "ConsumeTokenSession on a back end that is not a Consumer")
+	if !strings.Contains(err.Error(), "not implemented") {
+		t.Fatal("ConsumeTokenSession on a back end that is not a Consumer: not reported as unimplemented - " +
+			err.Error())
 	}
 	if _, _, err := st.GetTokenSession(tok); err != nil {
 		t.Fatal("GetTokenSession failed, so the test proves nothing about Consumer - " + err.Error())

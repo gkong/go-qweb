@@ -25,6 +25,7 @@ func tokenStore(t *testing.T, keys ...[]byte) *qsess.Store {
 	if err != nil {
 		t.Fatal("NewMapStore failed - " + err.Error())
 	}
+	t.Cleanup(func() { st.PruneKill <- 0 })
 	st.AuthType = qsess.TokenAuth
 	return st
 }

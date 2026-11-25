@@ -6,9 +6,11 @@ package qstest
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -102,6 +104,15 @@ func ExpirationTest(t *testing.T, store *qsess.Store) {
 	r, _ := http.NewRequest("GET", "http://nowhere.com", nil)
 	r.Header.Add("Authorization", "Bearer "+tok)
 
+	// a second session expiring with the first, for consuming once it has expired
+	_, consumer := st.BackEnd().(qsess.Consumer)
+	var consumeTok string
+	if consumer {
+		consumeSess := st.NewSession([]byte("userid-foo"))
+		consumeSess.MaxAgeSecs = 3
+		consumeTok = saveToken(t, consumeSess)
+	}
+
 	sess, _, getErr := st.GetSession(httptest.NewRecorder(), r)
 	if getErr != nil {
 		t.Fatalf("first Get failed, but session should not have expired yet - %s", getErr.Error())
@@ -120,6 +131,189 @@ func ExpirationTest(t *testing.T, store *qsess.Store) {
 	if getErr == nil {
 		t.Fatal("Get succeeded, but session should be expired")
 	}
+	MustMatchClass(t, getErr, qsess.ErrInvalidCredential, "Get of an expired session")
+
+	if consumer {
+		_, err := st.ConsumeTokenSession(consumeTok)
+		MustMatchClass(t, err, qsess.ErrInvalidCredential, "ConsumeTokenSession of an expired session")
+	}
+}
+
+// ErrorsTest checks that GetSession, GetTokenSession and ConsumeTokenSession report the right one of
+// qsess's error classes, and only it, for a request that carries nothing, a value that does not decrypt
+// and a session deleted, revoked or consumed, or a back end that cannot consume; that Token reports a
+// deleted session the same way; and that Delete of a session already gone succeeds. The store must
+// support DeleteByUserID; expired sessions are ExpirationTest's.
+func ErrorsTest(t *testing.T, store *qsess.Store) {
+	st := *store // make a copy, to mess with
+
+	st.AuthType = qsess.CookieAuth
+	r, _ := http.NewRequest("GET", "http://foo.com", nil)
+	_, _, err := st.GetSession(httptest.NewRecorder(), r)
+	MustMatchClass(t, err, qsess.ErrNoCredential, "no cookie")
+	r.AddCookie(&http.Cookie{Name: st.CookieName, Value: ""})
+	_, _, err = st.GetSession(httptest.NewRecorder(), r)
+	MustMatchClass(t, err, qsess.ErrNoCredential, "empty cookie")
+
+	st.AuthType = qsess.TokenAuth
+	for _, header := range []string{"", "Basic dXNlcjpwYXNz", "Bearer "} {
+		r, _ := http.NewRequest("GET", "http://foo.com", nil)
+		if header != "" {
+			r.Header.Set("Authorization", header)
+		}
+		_, _, err := st.GetSession(httptest.NewRecorder(), r)
+		MustMatchClass(t, err, qsess.ErrNoCredential, "Authorization header "+strconv.Quote(header))
+	}
+
+	// well-formed base64 that no key opens
+	forged := base64.URLEncoding.EncodeToString(make([]byte, 40))
+	r, _ = http.NewRequest("GET", "http://foo.com", nil)
+	r.Header.Set("Authorization", "Bearer "+forged)
+	_, _, err = st.GetSession(httptest.NewRecorder(), r)
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "token that does not decrypt")
+	if errors.Is(err, qsess.ErrNotFound) {
+		t.Fatal("a token that does not decrypt was reported as a back-end miss - " + err.Error())
+	}
+
+	userID := []byte("userid-errors")
+
+	sess := st.NewSession(userID)
+	tok := saveToken(t, sess)
+	if err := sess.Delete(httptest.NewRecorder()); err != nil {
+		t.Fatal("Delete failed - " + err.Error())
+	}
+	_, _, err = st.GetTokenSession(tok)
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "token of a deleted session")
+	if !errors.Is(err, qsess.ErrNotFound) {
+		t.Fatal("token of a deleted session: not reported as a back-end miss - " + err.Error())
+	}
+	_, _, err = sess.Token()
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "Token of a deleted session")
+	if err := sess.Delete(httptest.NewRecorder()); err != nil {
+		t.Fatal("Delete of a session deleted already failed - " + err.Error())
+	}
+
+	sess = st.NewSession(userID)
+	tok = saveToken(t, sess)
+	if err := sess.DeleteByUserID(httptest.NewRecorder()); err != nil {
+		t.Fatal("DeleteByUserID failed - " + err.Error())
+	}
+	_, _, err = st.GetTokenSession(tok)
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "token of a revoked session")
+	if err := sess.Delete(httptest.NewRecorder()); err != nil {
+		t.Fatal("Delete of a revoked session failed - " + err.Error())
+	}
+
+	sess = st.NewSession(userID)
+	tok = saveToken(t, sess)
+	if _, ok := st.BackEnd().(qsess.Consumer); !ok {
+		_, err = st.ConsumeTokenSession(tok)
+		MustMatchClass(t, err, qsess.ErrApplication, "ConsumeTokenSession on a back end that cannot consume")
+		if !strings.Contains(err.Error(), "not implemented") {
+			t.Fatal("ConsumeTokenSession on a back end that cannot consume: not reported as unimplemented - " +
+				err.Error())
+		}
+		sess.Delete(httptest.NewRecorder())
+		return
+	}
+	_, err = st.ConsumeTokenSession(forged)
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "consuming a token that does not decrypt")
+	if _, err := st.ConsumeTokenSession(tok); err != nil {
+		t.Fatal("ConsumeTokenSession failed - " + err.Error())
+	}
+	_, err = st.ConsumeTokenSession(tok)
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "token consumed already")
+	if !errors.Is(err, qsess.ErrNotFound) {
+		t.Fatal("token consumed already: not reported as a back-end miss - " + err.Error())
+	}
+}
+
+// MustMatchClass fails the test unless err matches class, one of qsess.ErrNoCredential,
+// ErrInvalidCredential, ErrBackEnd and ErrApplication, and none of the others. what describes err.
+func MustMatchClass(t *testing.T, err error, class error, what string) {
+	t.Helper()
+	for _, c := range []error{qsess.ErrNoCredential, qsess.ErrInvalidCredential, qsess.ErrBackEnd,
+		qsess.ErrApplication} {
+		if errors.Is(err, c) != (c == class) {
+			t.Fatalf("%s: err = %v, want an error that matches %q and no other class", what, err, class)
+		}
+	}
+}
+
+// BackEndFailureTest checks that GetTokenSession, ConsumeTokenSession, Save and Token report a back end
+// that breakStore has made fail as ErrBackEnd, not as a miss, and that Delete reports it for a cookie store.
+func BackEndFailureTest(t *testing.T, store *qsess.Store, breakStore func()) {
+	st := *store // make a copy, to mess with
+	st.AuthType = qsess.TokenAuth
+
+	sess := st.NewSession([]byte("userid-failure"))
+	tok := saveToken(t, sess)
+	breakStore()
+
+	_, _, err := st.GetTokenSession(tok)
+	MustMatchClass(t, err, qsess.ErrBackEnd, "GetTokenSession on a failed back end")
+	if errors.Is(err, qsess.ErrNotFound) {
+		t.Fatal("a failed back end was reported as a back-end miss - " + err.Error())
+	}
+	if _, ok := st.BackEnd().(qsess.Consumer); ok {
+		_, err = st.ConsumeTokenSession(tok)
+		MustMatchClass(t, err, qsess.ErrBackEnd, "ConsumeTokenSession on a failed back end")
+		if errors.Is(err, qsess.ErrNotFound) {
+			t.Fatal("a failed back end was reported as a back-end miss when consuming - " + err.Error())
+		}
+	}
+	err = sess.Save(httptest.NewRecorder())
+	MustMatchClass(t, err, qsess.ErrBackEnd, "Save on a failed back end")
+	if errors.Is(err, qsess.ErrNotFound) {
+		t.Fatal("a failed back end was reported as a back-end miss when saving - " + err.Error())
+	}
+	_, _, err = sess.Token()
+	MustMatchClass(t, err, qsess.ErrBackEnd, "Token on a failed back end")
+
+	st.AuthType = qsess.CookieAuth
+	err = sess.Delete(httptest.NewRecorder())
+	MustMatchClass(t, err, qsess.ErrBackEnd, "Delete for a cookie store whose back end has failed")
+}
+
+// ExpiredSaveTest checks that a Save of a session that has expired, before anything has removed its record,
+// fails as for a session that is gone rather than bringing the session back. Cassandra's Save, an upsert, does not.
+func ExpiredSaveTest(t *testing.T, store *qsess.Store) {
+	sess := store.NewSession([]byte("userid-expiredsave"))
+	sess.MaxAgeSecs = 1
+	if err := sess.Save(httptest.NewRecorder()); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	time.Sleep(2100 * time.Millisecond)
+
+	sess.MaxAgeSecs = 3600
+	err := sess.Save(httptest.NewRecorder())
+	MustMatchClass(t, err, qsess.ErrInvalidCredential, "Save of an expired session")
+	if !errors.Is(err, qsess.ErrNotFound) {
+		t.Fatal("Save of an expired session: not reported as a back-end miss - " + err.Error())
+	}
+}
+
+// SaveAgainTest checks that a session saved again at once is saved, although the second Save may change
+// nothing in its record.
+func SaveAgainTest(t *testing.T, store *qsess.Store) {
+	sess := store.NewSession([]byte("userid-saveagain"))
+	for i := 0; i < 3; i++ {
+		if err := sess.Save(httptest.NewRecorder()); err != nil {
+			t.Fatalf("Save number %d in a row of one session failed - %s", i+1, err.Error())
+		}
+	}
+	sess.Delete(httptest.NewRecorder())
+}
+
+func saveToken(t *testing.T, sess *qsess.Session) string {
+	if err := sess.Save(httptest.NewRecorder()); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	tok, _, err := sess.Token()
+	if err != nil {
+		t.Fatal("Token failed - " + err.Error())
+	}
+	return tok
 }
 
 // ConsumeTest is a back-end-independent test of Store.ConsumeTokenSession, for a back end that
@@ -202,7 +396,7 @@ func ConsumeTest(t *testing.T, store *qsess.Store) {
 
 // DeleteByUserIdTest is a backend-independent test of DeleteByUserID.
 //
-// noZombies - report an error if Saving a deleted session succeeds
+// noZombies - require a Save of a revoked session to fail with ErrInvalidCredential and ErrNotFound
 func DeleteByUserIDTest(t *testing.T, store *qsess.Store, noZombies bool) {
 	var sessions = []struct {
 		userid string
@@ -278,8 +472,9 @@ func DeleteByUserIDTest(t *testing.T, store *qsess.Store, noZombies bool) {
 		// attempt to Save (should fail)
 		s.w = httptest.NewRecorder()
 		err := s.sess.Save(s.w)
-		if err == nil {
-			t.Errorf("Saving a deleted session should fail, but it succeeded.")
+		MustMatchClass(t, err, qsess.ErrInvalidCredential, "Save of a revoked session")
+		if !errors.Is(err, qsess.ErrNotFound) {
+			t.Fatal("Save of a revoked session: not reported as a back-end miss - " + err.Error())
 		}
 
 		// attempt to Get (should fail)

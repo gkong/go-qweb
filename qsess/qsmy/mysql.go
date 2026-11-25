@@ -18,12 +18,14 @@ import (
 // type sqlStore holds per-store information and conforms to the SessBackEnd interface.
 
 type sqlStore struct {
-	db         *sql.DB
-	sSelect    *sql.Stmt
-	sInsert    *sql.Stmt
-	sUpdate    *sql.Stmt
-	sDelete    *sql.Stmt
-	sDelUserID *sql.Stmt
+	db          *sql.DB
+	sSelect     *sql.Stmt
+	sLive       *sql.Stmt
+	sInsert     *sql.Stmt
+	sUpdate     *sql.Stmt
+	sDelete     *sql.Stmt
+	sDelExpired *sql.Stmt
+	sDelUserID  *sql.Stmt
 }
 
 // NewMysqlStore creates a new session store, using a MySQL database.
@@ -49,7 +51,7 @@ func NewMysqlStore(sdb *sql.DB, table string, dataField string, uidField string,
 
 	st, err := qsess.NewStore(ss, false, cipherkeys...)
 	if err != nil {
-		return nil, myErr{"NewMysqlStore - NewStore - ", err}
+		return nil, myErr{"NewMysqlStore - NewStore", err}
 	}
 	st.Name = table
 
@@ -65,17 +67,17 @@ func NewMysqlStore(sdb *sql.DB, table string, dataField string, uidField string,
 			INDEX(expires)
 		 ) DEFAULT CHARSET=utf8, AUTO_INCREMENT=1;`)
 	if err != nil {
-		return st, myErr{"NewMysqlStore - CREATE TABLE failed - ", err}
+		return st, myErr{"NewMysqlStore - CREATE TABLE failed", err}
 	}
 
 	_, err = sdb.Exec("SET GLOBAL event_scheduler = ON;")
 	if err != nil {
-		return st, myErr{"NewMysqlStore - cannot turn on event_scheduler - ", err}
+		return st, myErr{"NewMysqlStore - cannot turn on event_scheduler", err}
 	}
 
 	_, err = sdb.Exec("CREATE EVENT IF NOT EXISTS prune_expired_qsess ON SCHEDULE EVERY 2 MINUTE DO DELETE FROM " + table + " WHERE expires < NOW();")
 	if err != nil {
-		return st, myErr{"NewMysqlStore - CREATE EVENT prune_expired_qsess failed - ", err}
+		return st, myErr{"NewMysqlStore - CREATE EVENT prune_expired_qsess failed", err}
 	}
 
 	// calculation of expiration time and test for expiration are done on the MySQL server,
@@ -85,31 +87,42 @@ func NewMysqlStore(sdb *sql.DB, table string, dataField string, uidField string,
 		`SELECT data, userid, (TIME_TO_SEC(TIMEDIFF(expires,NOW()))), maxage, minrefresh FROM ` +
 			table + ` WHERE id = ?`)
 	if err != nil {
-		return st, myErr{"NewMysqlStore - prepare SELECT failed - ", err}
+		return st, myErr{"NewMysqlStore - prepare SELECT failed", err}
+	}
+
+	ss.sLive, err = sdb.Prepare(`SELECT 1 FROM ` + table + ` WHERE id = ? AND expires > NOW()`)
+	if err != nil {
+		return st, myErr{"NewMysqlStore - prepare SELECT 1 failed", err}
 	}
 
 	ss.sInsert, err = sdb.Prepare(
 		`INSERT INTO ` + table +
 			` (data, userid, expires, maxage, minrefresh) VALUES(?, ?, ADDTIME(NOW(), SEC_TO_TIME(?)), ?, ?)`)
 	if err != nil {
-		return st, myErr{"NewMysqlStore - prepare INSERT failed - ", err}
+		return st, myErr{"NewMysqlStore - prepare INSERT failed", err}
 	}
 
 	ss.sUpdate, err = sdb.Prepare(
 		`UPDATE ` + table +
-			` SET data = ?, userid = ?, expires = ADDTIME(NOW(), SEC_TO_TIME(?)), maxage = ?, minrefresh = ? WHERE id = ?`)
+			` SET data = ?, userid = ?, expires = ADDTIME(NOW(), SEC_TO_TIME(?)), maxage = ?, minrefresh = ?` +
+			` WHERE id = ? AND expires > NOW()`)
 	if err != nil {
-		return st, myErr{"NewMysqlStore - prepare UPDATE failed - ", err}
+		return st, myErr{"NewMysqlStore - prepare UPDATE failed", err}
 	}
 
 	ss.sDelete, err = sdb.Prepare(`DELETE FROM ` + table + ` WHERE id = ?`)
 	if err != nil {
-		return st, myErr{"NewMysqlStore - prepare DELETE failed - ", err}
+		return st, myErr{"NewMysqlStore - prepare DELETE failed", err}
+	}
+
+	ss.sDelExpired, err = sdb.Prepare(`DELETE FROM ` + table + ` WHERE id = ? AND expires <= NOW()`)
+	if err != nil {
+		return st, myErr{"NewMysqlStore - prepare DELETE of an expired row failed", err}
 	}
 
 	ss.sDelUserID, err = sdb.Prepare(`DELETE FROM ` + table + ` WHERE userid = ?`)
 	if err != nil {
-		return st, myErr{"NewMysqlStore - prepare DelUserID failed - ", err}
+		return st, myErr{"NewMysqlStore - prepare DelUserID failed", err}
 	}
 
 	return st, nil
@@ -120,11 +133,12 @@ func (ss *sqlStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, 
 	var data, userID []byte
 	var ttl, maxage, minrefresh int
 	if err := ss.sSelect.QueryRow(sessID).Scan(&data, &userID, &ttl, &maxage, &minrefresh); err != nil {
-		return []byte{}, []byte{}, 0, 0, 0, err
+		return []byte{}, []byte{}, 0, 0, 0, myErr{"sqlStore.Get - SELECT", notFound(err)}
 	}
 	if ttl <= 0 {
-		ss.Delete(sessIDbytes, []byte{})
-		return []byte{}, []byte{}, 0, 0, 0, myErr{"sqlStore.Get - record has expired", nil}
+		// only if still expired, because a Save can refresh the row after the SELECT
+		ss.sDelExpired.Exec(sessID)
+		return []byte{}, []byte{}, 0, 0, 0, myErr{"sqlStore.Get - record has expired", qsess.ErrNotFound}
 	}
 	return data, userID, ttl, maxage, minrefresh, nil
 }
@@ -134,24 +148,31 @@ func (ss *sqlStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 		// id is nil: insert a new record and save its id
 		result, err := ss.sInsert.Exec(data, userID, maxAgeSecs, maxAgeSecs, minRefreshSecs)
 		if err != nil {
-			return err
+			return myErr{"sqlStore.Save - INSERT failed", err}
 		}
 		newID, err := result.LastInsertId() // returns an int64
 		if err != nil {
-			return err
+			return myErr{"sqlStore.Save - LastInsertId failed", err}
 		}
 		if newID > int64(math.MaxUint32) {
-			return errors.New("sqlStore.Save - returned id is too big")
+			return myErr{"sqlStore.Save - returned id is too big", nil}
 		}
 		*sessID = sessIDToBytes(uint32(newID))
 	} else {
 		// id is NOT nil: it refers to an existing record; update it.
-		result, err := ss.sUpdate.Exec(data, userID, maxAgeSecs, maxAgeSecs, minRefreshSecs, bytesToSessID(*sessID))
+		id := bytesToSessID(*sessID)
+		result, err := ss.sUpdate.Exec(data, userID, maxAgeSecs, maxAgeSecs, minRefreshSecs, id)
 		if err != nil {
-			return err
+			return myErr{"sqlStore.Save - UPDATE failed", err}
 		}
 		if rows, _ := result.RowsAffected(); rows != 1 {
-			return myErr{fmt.Sprintf("sqlStore.Save - expect 1 row affected, got %d", rows), nil}
+			// NOTE: MySQL counts the rows an UPDATE changes, not those it matches, so a Save that changes
+			// nothing, as a second Save within the same second can, affects no row, and only a look tells
+			// that from a session that is gone or has expired.
+			var found int
+			if err := ss.sLive.QueryRow(id).Scan(&found); err != nil {
+				return myErr{"sqlStore.Save - SELECT of the live row", notFound(err)}
+			}
 		}
 	}
 	return nil
@@ -160,7 +181,7 @@ func (ss *sqlStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 func (ss *sqlStore) Delete(sessID []byte, uidNOTUSED []byte) error {
 	_, err := ss.sDelete.Exec(bytesToSessID(sessID))
 	if err != nil {
-		return err
+		return myErr{"sqlStore.Delete - DELETE failed", err}
 	}
 	return nil
 }
@@ -168,7 +189,7 @@ func (ss *sqlStore) Delete(sessID []byte, uidNOTUSED []byte) error {
 func (ss *sqlStore) DeleteByUserID(userID []byte) error {
 	_, err := ss.sDelUserID.Exec(userID)
 	if err != nil {
-		return err
+		return myErr{"sqlStore.DeleteByUserID - DELETE failed", err}
 	}
 	return nil
 }
@@ -196,4 +217,16 @@ func (e myErr) Error() string {
 		return "qsmy." + e.msg + " - " + e.err.Error()
 	}
 	return "qsmy." + e.msg
+}
+
+func (e myErr) Unwrap() error {
+	return e.err
+}
+
+// notFound makes database/sql's no-rows error match qsess.ErrNotFound as well.
+func notFound(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w - %w", qsess.ErrNotFound, err)
+	}
+	return err
 }

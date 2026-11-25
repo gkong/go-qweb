@@ -6,6 +6,8 @@
 package qsess_test
 
 import (
+	"errors"
+	"maps"
 	"net/http"
 	"sync"
 	"testing"
@@ -25,6 +27,7 @@ func makeTestStore(t *testing.T, delByUserId bool) *qsess.Store {
 	if err != nil {
 		t.Fatal("makeTestStore - NewMapStore failed - " + err.Error())
 	}
+	t.Cleanup(func() { st.PruneKill <- 0 })
 
 	return st
 }
@@ -47,6 +50,21 @@ func TestMapDeleteByUserId(t *testing.T) {
 func TestMapExpiration(t *testing.T) {
 	st := makeTestStore(t, false)
 	qstest.ExpirationTest(t, st)
+}
+
+func TestMapErrors(t *testing.T) {
+	st := makeTestStore(t, false)
+	qstest.ErrorsTest(t, st)
+}
+
+func TestMapSaveAgain(t *testing.T) {
+	st := makeTestStore(t, false)
+	qstest.SaveAgainTest(t, st)
+}
+
+func TestMapExpiredSave(t *testing.T) {
+	st := makeTestStore(t, false)
+	qstest.ExpiredSaveTest(t, st)
 }
 
 // TestMapConcurrentExpiredGet presents many expired sessions at once. Get deletes a session it
@@ -89,8 +107,40 @@ func TestMapConcurrentExpiredGet(t *testing.T) {
 	close(results)
 
 	for err := range results {
-		if err == nil {
-			t.Fatal("GetTokenSession succeeded for an expired session")
+		if !errors.Is(err, qsess.ErrNotFound) {
+			t.Fatalf("GetTokenSession of an expired session: err = %v, want a miss", err)
+		}
+	}
+}
+
+// TestVarMapReadsEmptyData checks that a session saved while NewSessData was nil, whose data is empty, reads as the
+// VarMap that NewSessData gives, holding what that put in it, so that an application that starts keeping data keeps
+// its sessions.
+func TestVarMapReadsEmptyData(t *testing.T) {
+	st := tokenStore(t, bindingKey1)
+	newSessData := st.NewSessData
+	st.NewSessData = nil
+	token := saveToken(t, st)
+
+	for _, c := range []struct {
+		what        string
+		newSessData func() qsess.SessData
+		want        map[interface{}]interface{}
+	}{
+		{"the default VarMap", newSessData, map[interface{}]interface{}{}},
+		{"a VarMap with no map", func() qsess.SessData { return &qsess.VarMap{} }, map[interface{}]interface{}{}},
+		{"a VarMap holding a default", func() qsess.SessData {
+			return &qsess.VarMap{Vars: map[interface{}]interface{}{"theme": "dark"}}
+		}, map[interface{}]interface{}{"theme": "dark"}},
+	} {
+		st.NewSessData = c.newSessData
+		sess, _, err := st.GetTokenSession(token)
+		if err != nil {
+			t.Fatalf("NewSessData giving %s: GetTokenSession of a session saved with no data failed - %v", c.what, err)
+		}
+		if vars := sess.Data.(*qsess.VarMap).Vars; vars == nil || !maps.Equal(vars, c.want) {
+			t.Errorf("NewSessData giving %s: a session saved with no data reads as %#v, want %v", c.what, vars,
+				c.want)
 		}
 	}
 }

@@ -24,6 +24,7 @@ func makeTestStore(t *testing.T, delByUserID bool) *Store {
 	if err != nil {
 		t.Fatal("makeTestStore - NewMapStore failed - " + err.Error())
 	}
+	t.Cleanup(func() { st.PruneKill <- 0 })
 
 	return st
 }

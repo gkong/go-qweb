@@ -4,6 +4,7 @@
 package qspgx
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gkong/go-qweb/qsess"
 	"github.com/gkong/go-qweb/qsess/qstest"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -81,6 +83,93 @@ func TestPgsqlExpiration(t *testing.T) {
 	st := makeTestStore(t, "exp")
 	qstest.ExpirationTest(t, st)
 	dropTestTable(t, "exp")
+}
+
+func TestPgsqlErrors(t *testing.T) {
+	st := makeTestStore(t, "errors")
+	qstest.ErrorsTest(t, st)
+	dropTestTable(t, "errors")
+}
+
+func TestPgsqlBackEndFailure(t *testing.T) {
+	st := makeTestStore(t, "back_end_failure")
+	qstest.BackEndFailureTest(t, st, func() { dropTestTable(t, "back_end_failure") })
+}
+
+func TestPgsqlSaveAgain(t *testing.T) {
+	st := makeTestStore(t, "save_again")
+	qstest.SaveAgainTest(t, st)
+	dropTestTable(t, "save_again")
+}
+
+func TestPgsqlExpiredSave(t *testing.T) {
+	st := makeTestStore(t, "expired_save")
+	qstest.ExpiredSaveTest(t, st)
+	dropTestTable(t, "expired_save")
+}
+
+// saveRow saves a row for maxAgeSecs through the back end and returns its id.
+func saveRow(t *testing.T, ps *pgxStore, maxAgeSecs int) []byte {
+	var id []byte
+	if err := ps.Save(&id, []byte{1}, []byte("user"), maxAgeSecs, 0); err != nil {
+		t.Fatal("Save failed - " + err.Error())
+	}
+	return id
+}
+
+// TestPgsqlGetDeletesOnlyExpired checks that Get, given a SELECT that reports every row expired, deletes only a row
+// still expired by the time it does, sparing one a Save refreshed after the SELECT, and that it reports a row it
+// found expired as a miss even when its DELETE fails.
+func TestPgsqlGetDeletesOnlyExpired(t *testing.T) {
+	st := makeTestStore(t, "get_delete")
+	ps := st.BackEnd().(*pgxStore)
+	ps.pGetQuerySQL = `SELECT data, userid, 0, maxage, minrefresh FROM get_delete WHERE id = $1`
+	for _, c := range []struct {
+		maxAgeSecs int
+		gone       bool
+	}{{3600, false}, {-1, true}} {
+		id := saveRow(t, ps, c.maxAgeSecs)
+		if _, _, _, _, _, err := ps.Get(id, nil); !errors.Is(err, qsess.ErrNotFound) {
+			t.Fatalf("Get through a SELECT that reports the row expired: err = %v, want a miss", err)
+		}
+		var one int
+		err := ps.db.QueryRow(noctx, "SELECT 1 FROM get_delete WHERE id = $1", bytesToSessID(id)).Scan(&one)
+		if gone := errors.Is(err, pgx.ErrNoRows); gone != c.gone {
+			t.Errorf("Get of a row saved for %d seconds: gone = %v, want %v - %v", c.maxAgeSecs, gone, c.gone, err)
+		}
+	}
+
+	ps.pGetDeleteSQL = `DELETE FROM get_delete_missing WHERE id = $1`
+	if _, _, _, _, _, err := ps.Get(saveRow(t, ps, -1), nil); !errors.Is(err, qsess.ErrNotFound) {
+		t.Errorf("Get of an expired row whose DELETE fails: err = %v, want a miss", err)
+	}
+	dropTestTable(t, "get_delete")
+}
+
+// TestPgsqlExpirySecond checks that Get and Consume report a row as expired once its expires is reached, as Save's
+// UPDATE does, and that a row saved for a second is live for that second, which rounding the time left down to
+// whole seconds would not let it be.
+func TestPgsqlExpirySecond(t *testing.T) {
+	st := makeTestStore(t, "expiry_second")
+	ps := st.BackEnd().(*pgxStore)
+
+	const expireNow = "UPDATE expiry_second SET expires = NOW() WHERE id = $1"
+	for _, c := range []struct {
+		name string
+		read func([]byte, []byte) ([]byte, []byte, int, int, int, error)
+	}{{"Get", ps.Get}, {"Consume", ps.Consume}} {
+		if _, _, ttl, _, _, err := c.read(saveRow(t, ps, 1), nil); err != nil || ttl != 1 {
+			t.Errorf("%s of a row saved for a second: ttl = %d, err = %v, want 1 and nil", c.name, ttl, err)
+		}
+		id := saveRow(t, ps, 3600)
+		if _, err := ps.db.Exec(noctx, expireNow, bytesToSessID(id)); err != nil {
+			t.Fatal("UPDATE failed - " + err.Error())
+		}
+		if _, _, _, _, _, err := c.read(id, nil); !errors.Is(err, qsess.ErrNotFound) {
+			t.Errorf("%s of a row whose expires has been reached: err = %v, want a miss", c.name, err)
+		}
+	}
+	dropTestTable(t, "expiry_second")
 }
 
 // TestPgsqlConsume runs the shared ConsumeTokenSession test against PostgreSQL, where the

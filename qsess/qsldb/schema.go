@@ -12,6 +12,8 @@ package qsldb
 
 import (
 	"time"
+
+	"github.com/gkong/go-qweb/qsess"
 )
 
 const (
@@ -47,11 +49,16 @@ const sessValueFixedPartSize = 3*bytesPerInt64 + 1
 
 func newSessValue(uidsize int, datasize int) (gldbSessValue, error) {
 	if uidsize > 255 {
-		return nil, gldbErr{"newSessValue - uidsize must be <= 255", nil}
+		return nil, gldbErr{"newSessValue - uidsize must be <= 255", qsess.ErrApplication}
 	}
 	v := gldbSessValue(make([]byte, sessValueFixedPartSize+uidsize+datasize))
 	v.uidsizeBytes()[0] = byte(uidsize)
 	return v, nil
+}
+
+// valid reports whether v is long enough for the user id its size byte claims, which userID and data slice out.
+func (v *gldbSessValue) valid() bool {
+	return len(*v) >= sessValueFixedPartSize && len(*v) >= sessValueFixedPartSize+v.uidsize()
 }
 
 func (v *gldbSessValue) expiration() int64 {

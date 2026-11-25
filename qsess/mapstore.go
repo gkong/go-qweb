@@ -35,12 +35,26 @@ type mapStore struct {
 	uindex map[string]map[uint32]struct{}
 }
 
+const (
+	mapPruneIntervalSecs = 2 * 60
+	mapPruneBatch        = 1024
+)
+
 func (m *mapStore) uindexAdd(userID string, sessID uint32) {
 	_, ok := m.uindex[userID]
 	if !ok {
 		m.uindex[userID] = make(map[uint32]struct{}, 1)
 	}
 	m.uindex[userID][sessID] = struct{}{}
+}
+
+// uindexRemove also removes userID once it has no sessions left, so that the index does not keep
+// an entry for every user id it has seen.
+func (m *mapStore) uindexRemove(userID string, sessID uint32) {
+	delete(m.uindex[userID], sessID)
+	if len(m.uindex[userID]) == 0 {
+		delete(m.uindex, userID)
+	}
 }
 
 // NewMapStore creates a new session store, using a simple, in-memory map,
@@ -52,6 +66,12 @@ func (m *mapStore) uindexAdd(userID string, sessID uint32) {
 //
 // Store.Name is random: nothing in a map store outlives the process, and map
 // stores that share keys never accept each other's values.
+//
+// NewMapStore creates a goroutine, to delete expired sessions every two
+// minutes, which you can control using two channels in the Store:
+// PruneInterval and PruneKill. It keeps the store in memory until it receives
+// on PruneKill, so a program that discards map stores, such as a test, must
+// send on PruneKill for each one.
 //
 // Additional configuration options can be set by manipulating fields in the
 // returned qsess.Store.
@@ -65,7 +85,7 @@ func NewMapStore(cipherkeys ...[]byte) (*Store, error) {
 
 	st, err := NewStore(ms, false, cipherkeys...)
 	if err != nil {
-		return nil, qsErr{"NewMapStore - NewStore - ", err}
+		return nil, qsErr{"NewMapStore - NewStore", err}
 	}
 
 	name := make([]byte, 8)
@@ -73,6 +93,10 @@ func NewMapStore(cipherkeys ...[]byte) (*Store, error) {
 		return nil, qsErr{"NewMapStore - could not create Name", err}
 	}
 	st.Name = hex.EncodeToString(name)
+
+	st.PruneInterval = make(chan int)
+	st.PruneKill = make(chan int)
+	go ms.prune(mapPruneIntervalSecs, st.PruneInterval, st.PruneKill)
 
 	return st, nil
 }
@@ -85,12 +109,12 @@ func (m *mapStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, i
 	m.RUnlock()
 
 	if !ok {
-		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Get - id not found", nil}
+		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Get - id not found", ErrNotFound}
 	}
 	ttl := s.expireTime - time.Now().Unix()
 	if ttl <= 0 {
 		m.deleteExpired(sessID)
-		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Get - key not found", nil}
+		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Get - expired", ErrNotFound}
 	}
 
 	return s.data, []byte(s.userID), int(ttl), s.maxAgeSecs, s.minRefreshSecs, nil
@@ -104,8 +128,38 @@ func (m *mapStore) deleteExpired(sessID uint32) {
 
 	s, ok := m.sess[sessID]
 	if ok && s.expireTime <= time.Now().Unix() {
-		delete(m.uindex[s.userID], sessID)
+		m.uindexRemove(s.userID, sessID)
 		delete(m.sess, sessID)
+	}
+}
+
+// prune deletes expired sessions every waitSecs seconds, until it receives on pruneKill; a value
+// received on pruneInterval replaces waitSecs. It lets go of the lock every mapPruneBatch sessions,
+// because once a writer is waiting even the read lock holds up every request for the rest of a pass.
+func (m *mapStore) prune(waitSecs int, pruneInterval <-chan int, pruneKill <-chan int) {
+	for {
+		select {
+		case waitSecs = <-pruneInterval:
+		case <-pruneKill:
+			return
+		case <-time.After(time.Duration(waitSecs) * time.Second):
+		}
+
+		now := time.Now().Unix()
+		visited := 0
+		m.Lock()
+		for sessID, s := range m.sess {
+			if s.expireTime <= now {
+				m.uindexRemove(s.userID, sessID)
+				delete(m.sess, sessID)
+			}
+			visited++
+			if visited%mapPruneBatch == 0 {
+				m.Unlock()
+				m.Lock()
+			}
+		}
+		m.Unlock()
 	}
 }
 
@@ -118,15 +172,15 @@ func (m *mapStore) Consume(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byt
 	sessID := bytesToID(sessIDbytes)
 	s, ok := m.sess[sessID]
 	if !ok {
-		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Consume - id not found", nil}
+		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Consume - id not found", ErrNotFound}
 	}
-	delete(m.uindex[s.userID], sessID)
+	m.uindexRemove(s.userID, sessID)
 	delete(m.sess, sessID)
 
 	// the session is gone either way, which is what expiration would have done
 	ttl := s.expireTime - time.Now().Unix()
 	if ttl <= 0 {
-		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Consume - record has expired", nil}
+		return []byte{}, []byte{}, 0, 0, 0, qsErr{"mapStore.Consume - record has expired", ErrNotFound}
 	}
 
 	return s.data, []byte(s.userID), int(ttl), s.maxAgeSecs, s.minRefreshSecs, nil
@@ -146,8 +200,12 @@ func (m *mapStore) Save(sessIDbytes *[]byte, data []byte, userIDbytes []byte, ma
 	} else {
 		sessID = bytesToID(*sessIDbytes)
 		// see if session exists; could be gone via expiration or DeleteByUserId
-		if _, ok := m.sess[sessID]; !ok {
-			return qsErr{"mapStore.Save - id not found", nil}
+		s, ok := m.sess[sessID]
+		if !ok {
+			return qsErr{"mapStore.Save - id not found", ErrNotFound}
+		}
+		if s.expireTime <= time.Now().Unix() {
+			return qsErr{"mapStore.Save - expired", ErrNotFound}
 		}
 	}
 	userID := string(userIDbytes)
@@ -167,8 +225,10 @@ func (m *mapStore) Delete(sessIDbytes []byte, uidNOTUSED []byte) error {
 	defer m.Unlock()
 
 	sessID := bytesToID(sessIDbytes)
-	delete(m.uindex[m.sess[sessID].userID], sessID)
-	delete(m.sess, sessID)
+	if s, ok := m.sess[sessID]; ok {
+		m.uindexRemove(s.userID, sessID)
+		delete(m.sess, sessID)
+	}
 	return nil
 }
 
@@ -179,8 +239,8 @@ func (m *mapStore) DeleteByUserID(userIDbytes []byte) error {
 	userID := string(userIDbytes)
 	for sessID := range m.uindex[userID] {
 		delete(m.sess, sessID)
-		delete(m.uindex[userID], sessID)
 	}
+	delete(m.uindex, userID)
 	return nil
 }
 

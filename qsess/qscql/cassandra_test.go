@@ -22,7 +22,9 @@ func TestMain(m *testing.M) {
 
 	ret := m.Run()
 
-	dbDrop()
+	if db != nil {
+		dbDrop()
+	}
 	os.Exit(ret)
 }
 
@@ -116,4 +118,35 @@ func TestCassUCDeleteByUserId(t *testing.T) {
 func TestCassExpiration(t *testing.T) {
 	st := makeTestStore(t, "exp", false, false)
 	qstest.ExpirationTest(t, st)
+}
+
+// TestCassUCErrors keys its table by user id, the DeleteByUserID arrangement that works on Scylla too.
+func TestCassUCErrors(t *testing.T) {
+	st := makeTestStore(t, "UCerrors", false, true)
+	qstest.ErrorsTest(t, st)
+}
+
+func TestCassSaveAgain(t *testing.T) {
+	st := makeTestStore(t, "save_again", false, false)
+	qstest.SaveAgainTest(t, st)
+}
+
+// TestCassDeleteByUserIDMisuse checks that DeleteByUserID on a store with neither uidIndex nor uidToClient, which
+// NewCqlStore's documentation rules out, is ErrApplication; refused before any query, it needs no server.
+func TestCassDeleteByUserIDMisuse(t *testing.T) {
+	st, err := qsess.NewStore(&cqlStore{}, false, []byte("key-for-encryption--------------"))
+	if err != nil {
+		t.Fatal("NewStore failed - " + err.Error())
+	}
+	qstest.MustMatchClass(t, st.NewSession([]byte("user")).DeleteByUserID(nil), qsess.ErrApplication,
+		"DeleteByUserID with neither uidIndex nor uidToClient")
+}
+
+func TestCassBackEndFailure(t *testing.T) {
+	st := makeTestStore(t, "back_end_failure", false, false)
+	qstest.BackEndFailureTest(t, st, func() {
+		if err := db.Query(`DROP TABLE "back_end_failure"`).Exec(); err != nil {
+			t.Fatal("DROP TABLE failed - " + err.Error())
+		}
+	})
 }

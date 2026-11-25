@@ -11,11 +11,14 @@ package qspgx
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"time"
 
 	"github.com/gkong/go-qweb/qsess"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -47,19 +50,20 @@ type pgxStore struct {
 // Additional configuration options can be set by manipulating fields in the returned qsess.Store.
 func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherkeys ...[]byte) (*qsess.Store, error) {
 	ps := &pgxStore{
-		db:            pdb,
-		table:         tableName,
-		pGetQuerySQL:  `SELECT data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM ` + tableName + ` WHERE id = $1`,
-		pGetDeleteSQL: `DELETE FROM ` + tableName + ` WHERE id = $1`,
+		db:    pdb,
+		table: tableName,
+		pGetQuerySQL: `SELECT data, userid, CEIL(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh FROM ` +
+			tableName + ` WHERE id = $1`,
+		pGetDeleteSQL: `DELETE FROM ` + tableName + ` WHERE id = $1 AND expires <= NOW()`,
 		pConsumeSQL: `DELETE FROM ` + tableName + ` WHERE id = $1` +
-			` RETURNING data, userid, FLOOR(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh`,
+			` RETURNING data, userid, CEIL(EXTRACT(EPOCH FROM (expires-NOW()))), maxage, minrefresh`,
 		pDeleteSQL:         `DELETE FROM ` + tableName + ` WHERE id = $1`,
 		pDeleteByUserIDSQL: `DELETE FROM ` + tableName + ` WHERE userid = $1`,
 	}
 
 	st, err := qsess.NewStore(ps, false, cipherkeys...)
 	if err != nil {
-		return nil, pgxErr{"NewPgxStore - NewStore - ", err}
+		return nil, pgxErr{"NewPgxStore - NewStore", err}
 	}
 	st.Name = tableName
 
@@ -78,17 +82,17 @@ func NewPgxStore(pdb *pgxpool.Pool, tableName string, errLog io.Writer, cipherke
 			minrefresh INTEGER
 		 )`)
 	if err != nil {
-		return st, pgxErr{"NewPgxStore - CREATE TABLE failed - ", err}
+		return st, pgxErr{"NewPgxStore - CREATE TABLE failed", err}
 	}
 
 	_, err = pdb.Exec(noctx, `CREATE INDEX IF NOT EXISTS `+tableName+`_userid ON `+tableName+` (userid)`)
 	if err != nil {
-		return st, pgxErr{"NewPgxStore - CREATE userid index failed - ", err}
+		return st, pgxErr{"NewPgxStore - CREATE userid index failed", err}
 	}
 
 	_, err = pdb.Exec(noctx, `CREATE INDEX IF NOT EXISTS `+tableName+`_expires ON `+tableName+` (expires)`)
 	if err != nil {
-		return st, pgxErr{"NewPgxStore - CREATE userid index failed - ", err}
+		return st, pgxErr{"NewPgxStore - CREATE userid index failed", err}
 	}
 
 	return st, nil
@@ -101,14 +105,14 @@ func (ps *pgxStore) Get(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []byte, 
 
 	row := ps.db.QueryRow(noctx, ps.pGetQuerySQL, sessID)
 	if err := row.Scan(&data, &userID, &ttl, &maxage, &minrefresh); err != nil {
-		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - row.Scan failed - ", err}
+		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - SELECT", notFound(err)}
 	}
 
 	if ttl <= 0 {
-		if _, err := ps.db.Exec(noctx, ps.pGetDeleteSQL, sessID); err != nil {
-			return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - DELETE failed - ", err}
-		}
-		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - record has expired", nil}
+		// the session has expired whether or not this succeeds, and prune deletes the row if it fails; the
+		// DELETE spares a row that a Save refreshed after the SELECT
+		ps.db.Exec(noctx, ps.pGetDeleteSQL, sessID)
+		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Get - record has expired", qsess.ErrNotFound}
 	}
 	return data, userID, ttl, maxage, minrefresh, nil
 }
@@ -122,12 +126,12 @@ func (ps *pgxStore) Consume(sessIDbytes []byte, uidNOTUSED []byte) ([]byte, []by
 
 	row := ps.db.QueryRow(noctx, ps.pConsumeSQL, sessID)
 	if err := row.Scan(&data, &userID, &ttl, &maxage, &minrefresh); err != nil {
-		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Consume - row.Scan failed - ", err}
+		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Consume - DELETE", notFound(err)}
 	}
 
 	// the row is gone either way, which is what prune would have done
 	if ttl <= 0 {
-		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Consume - record has expired", nil}
+		return []byte{}, []byte{}, 0, 0, 0, pgxErr{"pgxStore.Consume - record has expired", qsess.ErrNotFound}
 	}
 
 	return data, userID, ttl, maxage, minrefresh, nil
@@ -144,7 +148,7 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 			` (data, userid, expires, maxage, minrefresh) VALUES($1, $2, NOW() + INTERVAL '`+strconv.Itoa(maxAgeSecs)+` seconds', $3, $4) RETURNING id`,
 			data, userID, maxAgeSecs, minRefreshSecs)
 		if err := row.Scan(&newID); err != nil {
-			return pgxErr{"pgxStore.Save - row.Scan failed - ", err}
+			return pgxErr{"pgxStore.Save - INSERT failed", err}
 		}
 
 		*sessID = sessIDToBytes(newID)
@@ -152,14 +156,15 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 		// id is NOT nil: it refers to an existing record; update it.
 
 		cmdtag, err := ps.db.Exec(noctx, `UPDATE `+ps.table+
-			` SET data = $1, userid = $2, expires = NOW() + INTERVAL '`+strconv.Itoa(maxAgeSecs)+` seconds', maxage = $3, minrefresh = $4 WHERE id = $5`,
+			` SET data = $1, userid = $2, expires = NOW() + INTERVAL '`+strconv.Itoa(maxAgeSecs)+` seconds',`+
+			` maxage = $3, minrefresh = $4 WHERE id = $5 AND expires > NOW()`,
 			data, userID, maxAgeSecs, minRefreshSecs, bytesToSessID(*sessID))
 		if err != nil {
-			return pgxErr{"pgxStore.Save - UPDATE failed - ", err}
+			return pgxErr{"pgxStore.Save - UPDATE failed", err}
 		}
-		// if record does not exist, UPDATE doesn't return an error! you have to check for no RowsAffected.
+		// if no live record exists, UPDATE doesn't return an error! you have to check for no RowsAffected.
 		if cmdtag.RowsAffected() < 1 {
-			return pgxErr{"pgxStore.Save - UPDATE affected no rows - ", err}
+			return pgxErr{"pgxStore.Save - no live row to UPDATE", qsess.ErrNotFound}
 		}
 	}
 	return nil
@@ -167,14 +172,14 @@ func (ps *pgxStore) Save(sessID *[]byte, data []byte, userID []byte, maxAgeSecs 
 
 func (ps *pgxStore) Delete(sessID []byte, uidNOTUSED []byte) error {
 	if _, err := ps.db.Exec(noctx, ps.pDeleteSQL, bytesToSessID(sessID)); err != nil {
-		return pgxErr{"pgxStore.Delete - DELETE failed - ", err}
+		return pgxErr{"pgxStore.Delete - DELETE failed", err}
 	}
 	return nil
 }
 
 func (ps *pgxStore) DeleteByUserID(userID []byte) error {
 	if _, err := ps.db.Exec(noctx, ps.pDeleteByUserIDSQL, userID); err != nil {
-		return pgxErr{"pgxStore.DeleteByUserID - DELETE failed - ", err}
+		return pgxErr{"pgxStore.DeleteByUserID - DELETE failed", err}
 	}
 	return nil
 }
@@ -221,4 +226,16 @@ func (e pgxErr) Error() string {
 		return "qspgx." + e.msg + " - " + e.err.Error()
 	}
 	return "qspgx." + e.msg
+}
+
+func (e pgxErr) Unwrap() error {
+	return e.err
+}
+
+// notFound makes pgx's no-rows error match qsess.ErrNotFound as well.
+func notFound(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w - %w", qsess.ErrNotFound, err)
+	}
+	return err
 }

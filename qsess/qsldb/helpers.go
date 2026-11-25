@@ -6,7 +6,12 @@ package qsldb
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
+
+	"github.com/gkong/go-qweb/qsess"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // concatenate byte slices, returning a new one containing the contents of all
@@ -54,4 +59,16 @@ func (e gldbErr) Error() string {
 		return "qsldb." + e.msg + " - " + e.err.Error()
 	}
 	return "qsldb." + e.msg
+}
+
+func (e gldbErr) Unwrap() error {
+	return e.err
+}
+
+// notFound makes goleveldb's not-found error match qsess.ErrNotFound as well.
+func notFound(err error) error {
+	if errors.Is(err, leveldb.ErrNotFound) {
+		return fmt.Errorf("%w - %w", qsess.ErrNotFound, err)
+	}
+	return err
 }
